@@ -57,10 +57,15 @@ Semua endpoint didekorasi dengan `save_session=False`, memastikan Odoo tidak mem
 
 ## 📸 Tangkapan Layar & Verifikasi Antarmuka
 
-| Visualisasi Peta Outlet & Geofence | Verifikasi REST API JSON | Hasil Automated Test Suite (20 Tests Pass) |
-|:---:|:---:|:---:|
-| ![Tampilan Peta Outlet & Validasi Geofencing SFA](docs/screenshots/01-odoo-sfa-location.png) | ![Verifikasi REST API JSON & Geofencing Response](docs/screenshots/02-api-json-verification.png) | ![Automated Test Suite](docs/screenshots/03-test-suite-20-passing.png) |
-| *Iframe OpenStreetMap tersemat dengan koordinat GPS, radius geofence, dan integrasi Google Maps* | *Verifikasi eksekusi REST API SFA, respon JSON geofence verified, dan atribusi pengguna* | *Eksekusi 20 integration test suite (HttpCase) di Odoo 18 tanpa kegagalan (0 failed, 0 error)* |
+### 1. Antarmuka Odoo & Respons REST API
+| Visualisasi Peta Outlet & Geofence (Odoo Form) | Pengujian Endpoint REST API & JSON Payload |
+|:---:|:---:|
+| ![Tampilan Peta Outlet & Validasi Geofencing SFA](docs/screenshots/01-odoo-sfa-location.png) | ![Verifikasi REST API JSON & Geofencing Response](docs/screenshots/02-api-json-verification.png) |
+| *Iframe OpenStreetMap tersemat dengan koordinat GPS, radius geofence, dan integrasi Google Maps* | *Verifikasi eksekusi REST API SFA, respon JSON geofence verified, dan atribusi pengguna* |
+
+### 2. Hasil Eksekusi Automated Test Suite (20 Tests Pass)
+![Hasil Eksekusi 20 Integration Tests Odoo 18](docs/screenshots/03-test-suite-20-passing.png)
+*Eksekusi seluruh 20 integration test suite (HttpCase) di lingkungan Odoo 18: 0 failed, 0 errors (100% lulus).*
 
 ---
 

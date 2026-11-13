@@ -1,0 +1,41 @@
+﻿# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Odoo sessions & filestore
+*.log
+filestore/
+sessions/
+
+# Odoo server configuration (contain sensitive master passwords)
+config/odoo.conf
+*.conf
+!config/odoo.conf.template
+!*.conf.template
+!*.conf.example
+
+# Docker & Environment (contain database credentials and secrets)
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+
+# Database dumps, exports, and backups
+*.dump
+*.sql
+*.bak
+
+# Secrets & Private Keys
+*.pem
+*.key
+
+# AI Agent & Local IDE configurations
+.antigravity/
+.cursor*
+.vscode/
+.idea/
+
+# OS specifics
+Thumbs.db
+.DS_Store

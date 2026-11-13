@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Partner Form View Extension: GPS Coordinates, Geofence Radius, & OSM Map -->
+    <record id="view_partner_form_inherit_tms" model="ir.ui.view">
+        <field name="name">res.partner.form.inherit.tms</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page name="tms_location" string="TMS &amp; SFA Location">
+                    <group>
+                        <group string="GPS Coordinates &amp; Geofence">
+                            <field name="partner_latitude"/>
+                            <field name="partner_longitude"/>
+                            <field name="geofence_radius_meters"/>
+                        </group>
+                        <group string="Logistics Zone">
+                            <field name="outlet_zone"/>
+                        </group>
+                    </group>
+                    <group string="Geographic Visualization (OSM)">
+                        <field name="map_embed_html" nolabel="1" widget="html"/>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

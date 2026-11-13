@@ -1,0 +1,10 @@
+[options]
+addons_path = /mnt/extra-addons
+data_dir = /var/lib/odoo
+# Master password for database management (create, drop, backup, restore).
+# NEVER commit your production master password to Git!
+# Change this to a strong secret for production environments directly in config/odoo.conf.
+admin_passwd = admin_dev_password
+# Enable proxy_mode so Werkzeug's ProxyFix inspects X-Forwarded-For headers when deployed behind reverse proxies (Nginx/Traefik/Cloudflare),
+# ensuring client_ip in Rate Guard resolves to the real client IP rather than the proxy/gateway IP.
+proxy_mode = True

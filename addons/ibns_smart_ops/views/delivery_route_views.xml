@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_picking_form_inherit_tms" model="ir.ui.view">
+        <field name="name">stock.picking.form.inherit.tms</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='origin']" position="after">
+                <field name="tms_route_sequence"/>
+                <field name="driver_id"/>
+                <field name="driver_name" invisible="driver_id"/>
+                <field name="delivery_status"/>
+                <field name="delivered_vs_invoiced_status" widget="badge"
+                       decoration-success="delivered_vs_invoiced_status == 'fully_reconciled'"
+                       decoration-warning="delivered_vs_invoiced_status == 'delivered_pending_invoice'"
+                       decoration-info="delivered_vs_invoiced_status == 'invoiced_pending_delivery'"
+                       decoration-muted="delivered_vs_invoiced_status in ('not_delivered', 'no_sale_order')"/>
+                <field name="delivered_qty_total" invisible="delivered_vs_invoiced_status == 'no_sale_order'"/>
+                <field name="invoiced_qty_total" invisible="delivered_vs_invoiced_status == 'no_sale_order'"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Picking List View Extension: Odoo 18 compliant (uses <list> view inherit) -->
+    <record id="view_picking_list_inherit_tms" model="ir.ui.view">
+        <field name="name">stock.picking.list.inherit.tms</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.vpicktree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='state']" position="before">
+                <field name="tms_route_sequence" optional="show"/>
+                <field name="driver_id" widget="many2one_avatar_user" optional="show"/>
+                <field name="driver_name" optional="hide"/>
+                <field name="delivery_status" optional="show"/>
+                <field name="delivered_vs_invoiced_status" widget="badge" optional="show"
+                       decoration-success="delivered_vs_invoiced_status == 'fully_reconciled'"
+                       decoration-warning="delivered_vs_invoiced_status == 'delivered_pending_invoice'"
+                       decoration-info="delivered_vs_invoiced_status == 'invoiced_pending_delivery'"
+                       decoration-muted="delivered_vs_invoiced_status in ('not_delivered', 'no_sale_order')"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

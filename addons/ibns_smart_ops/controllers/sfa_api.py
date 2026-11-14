@@ -139,78 +139,106 @@ class SfaApiController(http.Controller):
         """Autentikasi request via Odoo User API Key atau System Integration Key.
         Mengembalikan tuple (res.users record, None) jika valid,
         atau (None, Response) jika token tidak valid/absen.
+        Semua error encoding/decoding pada header autentikasi ditangkap secara aman (HTTP 401).
         """
-        token = request.httprequest.headers.get('X-IBNS-KEY')
-        if not token:
-            auth_header = request.httprequest.headers.get('Authorization', '')
-            if auth_header.startswith('Bearer '):
-                token = auth_header[7:].strip()
-            else:
-                token = auth_header.strip()
-
-        if not token:
-            _logger.warning("SFA API request rejected: Missing API key header.")
-            return None, Response(
-                json.dumps({"status": "error", "message": "Unauthorized: Missing API key"}),
-                content_type="application/json;charset=utf-8",
-                status=401
-            )
-
-        authenticated_user = None
-
-        # 1. Verifikasi via Odoo Native API Keys (res.users.apikeys)
         try:
-            if 'res.users.apikeys' in request.env:
-                uid = request.env['res.users.apikeys'].sudo()._check_credentials(scope='rpc', key=token)
-                if uid:
-                    user_candidate = request.env['res.users'].sudo().browse(uid)
-                    if user_candidate.exists() and user_candidate.active:
-                        authenticated_user = user_candidate
-        except (AccessDenied, AccessError) as e:
-            _logger.warning("Odoo native API key verification failed: %s", str(e))
+            token = request.httprequest.headers.get('X-IBNS-KEY')
+            if not token:
+                auth_header = request.httprequest.headers.get('Authorization', '')
+                if auth_header.startswith('Bearer '):
+                    token = auth_header[7:].strip()
+                else:
+                    token = auth_header.strip()
+
+            if not token:
+                _logger.warning("SFA API request rejected: Missing API key header.")
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Unauthorized: Missing API key"}),
+                    content_type="application/json;charset=utf-8",
+                    status=401
+                )
+
             authenticated_user = None
 
-        # 2. Fallback: Verifikasi System Integration Key (disimpan di ir.config_parameter / .env)
-        if not authenticated_user:
-            configured_key = request.env['ir.config_parameter'].sudo().get_param('ibns_smart_ops.sfa_api_key')
-            env_key = os.environ.get('SFA_API_SECRET_KEY')
+            # 1. Verifikasi via Odoo Native API Keys (res.users.apikeys)
+            try:
+                if 'res.users.apikeys' in request.env:
+                    uid = request.env['res.users.apikeys'].sudo()._check_credentials(scope='rpc', key=token)
+                    if uid:
+                        user_candidate = request.env['res.users'].sudo().browse(uid)
+                        if user_candidate.exists() and user_candidate.active:
+                            authenticated_user = user_candidate
+            except (AccessDenied, AccessError) as e:
+                _logger.warning("Odoo native API key verification failed: %s", str(e))
+                authenticated_user = None
+            except Exception as e:
+                _logger.warning("Error during native API credentials verification: %s", str(e))
+                authenticated_user = None
 
-            token_bytes = token.encode('utf-8') if isinstance(token, str) else (token or b'')
-            is_valid_sys_key = False
-            if configured_key and isinstance(configured_key, str):
-                is_valid_sys_key = is_valid_sys_key or hmac.compare_digest(token_bytes, configured_key.encode('utf-8'))
-            if env_key and isinstance(env_key, str):
-                is_valid_sys_key = is_valid_sys_key or hmac.compare_digest(token_bytes, env_key.encode('utf-8'))
+            # 2. Fallback: Verifikasi System Integration Key (disimpan di ir.config_parameter / .env)
+            if not authenticated_user:
+                configured_key = request.env['ir.config_parameter'].sudo().get_param('ibns_smart_ops.sfa_api_key')
+                env_key = os.environ.get('SFA_API_SECRET_KEY')
 
-            if is_valid_sys_key:
-                user_id_param = request.env['ir.config_parameter'].sudo().get_param('ibns_smart_ops.sfa_api_user_id')
-                if user_id_param and user_id_param.isdigit():
-                    sys_user = request.env['res.users'].sudo().browse(int(user_id_param))
-                    if sys_user.exists() and sys_user.active:
-                        authenticated_user = sys_user
-
-                if not authenticated_user:
-                    service_user = request.env.ref('ibns_smart_ops.user_sfa_api_service', raise_if_not_found=False)
-                    if service_user and service_user.exists() and service_user.active:
-                        authenticated_user = service_user
-
-                if not authenticated_user:
-                    _logger.warning("SFA API request rejected: Valid key but service user not found or inactive.")
+                # Konversi selalu kedua sisi ke UTF-8 bytes untuk mencegah TypeError pada perbandingan non-ASCII
+                try:
+                    token_bytes = token.encode('utf-8') if isinstance(token, str) else (token or b'')
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    _logger.warning("Token decoding/encoding error in authentication header.")
                     return None, Response(
-                        json.dumps({"status": "error", "message": "Unauthorized: Invalid or inactive API key"}),
+                        json.dumps({"status": "error", "message": "Unauthorized: Invalid API key format"}),
                         content_type="application/json;charset=utf-8",
                         status=401
                     )
 
-        if not authenticated_user or not authenticated_user.exists() or not authenticated_user.active:
-            _logger.warning("SFA API request rejected: Invalid or inactive API key.")
+                is_valid_sys_key = False
+                if configured_key and isinstance(configured_key, str):
+                    try:
+                        is_valid_sys_key = is_valid_sys_key or hmac.compare_digest(token_bytes, configured_key.encode('utf-8'))
+                    except Exception as e:
+                        _logger.warning("Error comparing configured_key digest: %s", str(e))
+                if env_key and isinstance(env_key, str):
+                    try:
+                        is_valid_sys_key = is_valid_sys_key or hmac.compare_digest(token_bytes, env_key.encode('utf-8'))
+                    except Exception as e:
+                        _logger.warning("Error comparing env_key digest: %s", str(e))
+
+                if is_valid_sys_key:
+                    user_id_param = request.env['ir.config_parameter'].sudo().get_param('ibns_smart_ops.sfa_api_user_id')
+                    if user_id_param and user_id_param.isdigit():
+                        sys_user = request.env['res.users'].sudo().browse(int(user_id_param))
+                        if sys_user.exists() and sys_user.active:
+                            authenticated_user = sys_user
+
+                    if not authenticated_user:
+                        service_user = request.env.ref('ibns_smart_ops.user_sfa_api_service', raise_if_not_found=False)
+                        if service_user and service_user.exists() and service_user.active:
+                            authenticated_user = service_user
+
+                    if not authenticated_user:
+                        _logger.warning("SFA API request rejected: Valid key but service user not found or inactive.")
+                        return None, Response(
+                            json.dumps({"status": "error", "message": "Unauthorized: Invalid or inactive API key"}),
+                            content_type="application/json;charset=utf-8",
+                            status=401
+                        )
+
+            if not authenticated_user or not authenticated_user.exists() or not authenticated_user.active:
+                _logger.warning("SFA API request rejected: Invalid or inactive API key.")
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Unauthorized: Invalid or inactive API key"}),
+                    content_type="application/json;charset=utf-8",
+                    status=401
+                )
+
+            return authenticated_user, None
+        except Exception as e:
+            _logger.warning("Unexpected error during authentication: %s", str(e))
             return None, Response(
-                json.dumps({"status": "error", "message": "Unauthorized: Invalid or inactive API key"}),
+                json.dumps({"status": "error", "message": "Unauthorized: Authentication error"}),
                 content_type="application/json;charset=utf-8",
                 status=401
             )
-
-        return authenticated_user, None
 
     @http.route('/api/v1/sfa/outlets', type='http', auth='public', methods=['GET'], csrf=False, save_session=False)
     def get_outlets(self, **kwargs):

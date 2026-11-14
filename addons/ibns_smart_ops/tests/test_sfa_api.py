@@ -117,7 +117,8 @@ class TestSfaApi(HttpCase):
         self.assertEqual(res_inv.status_code, 401)
 
     def test_02_unauthorized_invalid_token(self):
-        """Request dengan token kadaluarsa/salah via Bearer atau X-IBNS-KEY ditolak dengan HTTP 401."""
+        """Request dengan token kadaluarsa/salah via Bearer atau X-IBNS-KEY ditolak dengan HTTP 401:
+        Termasuk pengujian khusus header non-ASCII/Unicode yang memverifikasi pencegahan TypeError/HTTP 500."""
         headers_bearer = {'Authorization': 'Bearer wrong_or_expired_token'}
         res_b = self.url_open(self.endpoint, headers=headers_bearer)
         self.assertEqual(res_b.status_code, 401)
@@ -126,10 +127,17 @@ class TestSfaApi(HttpCase):
         res_c = self.url_open(self.endpoint, headers=headers_custom)
         self.assertEqual(res_c.status_code, 401)
 
-        # Verifikasi non-ASCII karakter pada header tidak memicu TypeError / HTTP 500
-        headers_non_ascii = {'X-IBNS-KEY': 'invalid_token_sp\xe9cial_\xf1'}
-        res_na = self.url_open(self.endpoint, headers=headers_non_ascii)
-        self.assertEqual(res_na.status_code, 401)
+        # 1. Verifikasi header X-IBNS-KEY berisi karakter non-ASCII (éñ) merespons HTTP 401 (bukan HTTP 500)
+        headers_non_ascii_key = {'X-IBNS-KEY': 'token-non-ascii-éñ'}
+        res_na_key = self.url_open(self.endpoint, headers=headers_non_ascii_key)
+        self.assertEqual(res_na_key.status_code, 401)
+        self.assertEqual(res_na_key.json().get('status'), 'error')
+
+        # 2. Verifikasi header Authorization: Bearer berisi karakter non-ASCII/Unicode (éñü) merespons HTTP 401 (bukan HTTP 500)
+        headers_non_ascii_bearer = {'Authorization': 'Bearer token_palsu_éñü'}
+        res_na_bearer = self.url_open(self.endpoint, headers=headers_non_ascii_bearer)
+        self.assertEqual(res_na_bearer.status_code, 401)
+        self.assertEqual(res_na_bearer.json().get('status'), 'error')
 
     # =========================================================================
     # 2. PENGUJIAN DUAL HEADER AUTHENTICATION (X-IBNS-KEY & Authorization Bearer)
@@ -532,15 +540,14 @@ class TestSfaApi(HttpCase):
 
     def test_14_delivered_vs_invoiced_picking_audit(self):
         """Memverifikasi komputasi audit Delivered vs Invoiced pada stock.picking untuk seluruh 5 status:
-        1. 'no_sale_order': Picking outgoing tanpa Sales Order
-        2. 'not_delivered': Terkait Sales Order, belum dikirim & belum difaktur
-        3. 'invoiced_pending_delivery': Faktur penjualan telah terposting mendahului pengiriman
-        4. 'delivered_pending_invoice': Barang terkirim namun belum difaktur / kuantitas tertagih belum lunas
-        5. 'fully_reconciled': Barang terkirim dan telah selesai tertagih secara penuh (invoiced)
-        - Dan verifikasi picking non-outgoing bernilai False (tidak masuk audit penjualan)"""
+        a) 'no_sale_order': Outgoing picking tanpa kaitan Sales Order
+        b) 'not_delivered': Outgoing picking terkait SO yang belum dikirim & belum difakturkan
+        c) 'invoiced_pending_delivery': Faktur SO sudah posted, tapi picking belum done
+        d) 'delivered_pending_invoice': Picking sudah done, tapi faktur belum dibuat/posted
+        e) 'fully_reconciled': Picking sudah done DAN faktur SO sudah posted penuh
+        Serta memastikan incoming picking (picking_type_id.code == 'incoming') TIDAK mendapat status no_sale_order (harus False)."""
         picking_type = self.env['stock.picking.type'].search([('code', '=', 'outgoing')], limit=1)
-        if not picking_type:
-            return
+        self.assertTrue(picking_type, "Outgoing picking type harus tersedia di sistem")
 
         # Setup produk dan Sales Order untuk pengujian audit siklus penjualan
         audit_product = self.env['product.product'].create({
@@ -557,7 +564,7 @@ class TestSfaApi(HttpCase):
             })]
         })
 
-        # 1. Verifikasi status 'no_sale_order': Outgoing picking tanpa kaitan sale_id
+        # a) Verifikasi status 'no_sale_order': Outgoing picking tanpa kaitan sale_id
         picking_no_so = self.env['stock.picking'].create({
             'picking_type_id': picking_type.id,
             'partner_id': self.test_outlet.id,
@@ -565,9 +572,10 @@ class TestSfaApi(HttpCase):
             'location_dest_id': self.test_outlet.property_stock_customer.id,
             'delivery_status': 'unassigned',
         })
-        self.assertEqual(picking_no_so.delivered_vs_invoiced_status, 'no_sale_order')
+        self.assertEqual(picking_no_so.delivered_vs_invoiced_status, 'no_sale_order',
+                         "Outgoing picking tanpa sale_id harus berstatus 'no_sale_order'")
 
-        # 2. Verifikasi status 'not_delivered': Terkait Sales Order, belum dikirim, belum difaktur
+        # b) Verifikasi status 'not_delivered': Outgoing picking terkait SO yang belum dikirim & belum difakturkan
         picking_so = self.env['stock.picking'].create({
             'picking_type_id': picking_type.id,
             'partner_id': self.test_outlet.id,
@@ -575,15 +583,17 @@ class TestSfaApi(HttpCase):
             'location_dest_id': self.test_outlet.property_stock_customer.id,
             'sale_id': sale_order.id,
             'delivery_status': 'scheduled',
+            'state': 'assigned',
         })
-        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'not_delivered')
+        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'not_delivered',
+                         "Outgoing picking terkait SO yang belum dikirim & belum difaktur harus berstatus 'not_delivered'")
 
-        # 3. Verifikasi status 'delivered_pending_invoice': Barang terkirim, faktur belum terbit
+        # d) Verifikasi status 'delivered_pending_invoice': Picking sudah done/delivered, tapi faktur belum dibuat/posted
         picking_so.write({'delivery_status': 'delivered'})
-        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'delivered_pending_invoice')
+        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'delivered_pending_invoice',
+                         "Picking sudah delivered tapi faktur belum dibuat/posted harus berstatus 'delivered_pending_invoice'")
 
-        # 4. Verifikasi status 'invoiced_pending_delivery': Faktur terbit namun barang belum terkirim
-        # Buat faktur pelanggan (out_invoice) terposting yang terhubung ke sale_order
+        # c) Verifikasi status 'invoiced_pending_delivery': Faktur SO sudah posted, tapi picking belum done
         invoice = self.env['account.move'].create({
             'move_type': 'out_invoice',
             'partner_id': self.test_outlet.id,
@@ -596,25 +606,28 @@ class TestSfaApi(HttpCase):
             })]
         })
         invoice.action_post()
-        # Kembalikan status picking ke scheduled (belum terkirim)
+        # Kembalikan status picking ke scheduled/assigned (belum terkirim)
         picking_so.write({'delivery_status': 'scheduled', 'state': 'assigned'})
-        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'invoiced_pending_delivery')
+        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'invoiced_pending_delivery',
+                         "Faktur SO sudah posted tapi picking belum done harus berstatus 'invoiced_pending_delivery'")
 
-        # 5. Verifikasi status 'fully_reconciled': Barang telah terkirim dan kuantitas faktur >= kuantitas kirim
+        # e) Verifikasi status 'fully_reconciled': Picking sudah done DAN faktur SO sudah posted penuh
         sale_order.order_line.write({'qty_delivered': 10.0})
-        picking_so.write({'delivery_status': 'delivered'})
-        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'fully_reconciled')
+        picking_so.write({'delivery_status': 'delivered', 'state': 'done'})
+        self.assertEqual(picking_so.delivered_vs_invoiced_status, 'fully_reconciled',
+                         "Picking sudah done dan faktur SO sudah posted penuh harus berstatus 'fully_reconciled'")
 
-        # Verifikasi batas: Operasi penerimaan barang (incoming receipt) tidak berstatus 'no_sale_order'
+        # Verifikasi batas: Operasi penerimaan barang (incoming picking) TIDAK mendapat status 'no_sale_order' (harus False)
         incoming_type = self.env['stock.picking.type'].search([('code', '=', 'incoming')], limit=1)
-        if incoming_type:
-            incoming_picking = self.env['stock.picking'].create({
-                'picking_type_id': incoming_type.id,
-                'partner_id': self.test_outlet.id,
-                'location_id': self.test_outlet.property_stock_customer.id,
-                'location_dest_id': incoming_type.default_location_dest_id.id,
-            })
-            self.assertFalse(incoming_picking.delivered_vs_invoiced_status)
+        self.assertTrue(incoming_type, "Incoming picking type harus tersedia di sistem")
+        incoming_picking = self.env['stock.picking'].create({
+            'picking_type_id': incoming_type.id,
+            'partner_id': self.test_outlet.id,
+            'location_id': self.test_outlet.property_stock_customer.id,
+            'location_dest_id': incoming_type.default_location_dest_id.id,
+        })
+        self.assertFalse(incoming_picking.delivered_vs_invoiced_status,
+                         "Incoming picking tidak boleh berstatus 'no_sale_order' (harus False)")
 
     # =========================================================================
     # 9. PENGUJIAN TAHAP 2: FALLBACK EMAIL CHATTER, RATE GUARD CLEANUP, SQL CONSTRAINT
@@ -735,14 +748,19 @@ class TestSfaApi(HttpCase):
         self.assertFalse(new_partner.outlet_zone, "Zona outlet partner baru harus kosong (False), bukan default 'east'")
 
     def test_20_rate_limit_429_too_many_requests(self):
-        """Memverifikasi penolakan HTTP 429 Too Many Requests saat ambang batas Rate Guard terlampaui."""
-        client_ip = '127.0.0.1'
-        now = time.time()
-        # Simulasikan IP 127.0.0.1 telah mencapai kuota batas 60 request dalam jendela 60 detik
-        _rate_limit_records[client_ip] = [now - 5.0] * 60
+        """Memverifikasi penolakan HTTP 429 Too Many Requests saat ambang batas Rate Guard terlampaui:
+        Benar-benar menembak endpoint hingga melewati batas 60 request/menit secara nyata,
+        kemudian memverifikasi status code 429 beserta keberadaan header Retry-After."""
+        _rate_limit_records.clear()
+        headers = {'X-IBNS-KEY': self.valid_token}
 
         try:
-            headers = {'X-IBNS-KEY': self.valid_token}
+            # 1. Tembak endpoint sebanyak 60 request yang sah secara beruntun (mencapai batas kuota)
+            for i in range(60):
+                res = self.url_open(self.endpoint, headers=headers)
+                self.assertEqual(res.status_code, 200, f"Request ke-{i + 1} harus berhasil (HTTP 200)")
+
+            # 2. Request ke-61 menembus batas kuota dalam jendela 60 detik -> Ditolak dengan HTTP 429
             response = self.url_open(self.endpoint, headers=headers)
             self.assertEqual(response.status_code, 429, "Request ke-61 harus ditolak dengan HTTP 429 Too Many Requests")
 
@@ -751,10 +769,10 @@ class TestSfaApi(HttpCase):
             self.assertIn('Too Many Requests', payload.get('message', ''))
             self.assertIn('Retry after', payload.get('message', ''))
 
-            # Verifikasi header respon Rate Limiter
-            self.assertIn('Retry-After', response.headers)
+            # 3. Verifikasi header respons Rate Limiter
+            self.assertIn('Retry-After', response.headers, "Header 'Retry-After' harus ada pada respons HTTP 429")
             self.assertEqual(response.headers.get('X-RateLimit-Limit'), '60')
             self.assertEqual(response.headers.get('X-RateLimit-Remaining'), '0')
         finally:
             # Bersihkan cache rate limiter agar tidak mempengaruhi pengujian lain
-            _rate_limit_records.pop(client_ip, None)
+            _rate_limit_records.clear()

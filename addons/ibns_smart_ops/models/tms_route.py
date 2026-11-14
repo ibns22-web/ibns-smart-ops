@@ -47,26 +47,32 @@ class StockPicking(models.Model):
 
     @api.onchange('driver_id')
     def _onchange_driver_id(self):
-        """Sinkronisasi nama driver saat driver_id dipilih di form UI."""
-        if self.driver_id and not self.driver_name:
+        """Sinkronisasi nama driver saat driver_id dipilih, diubah, atau dikosongkan di form UI."""
+        if self.driver_id:
             self.driver_name = self.driver_id.name
+        else:
+            self.driver_name = False
 
     @api.model_create_multi
     def create(self, vals_list):
         """Override create untuk sinkronisasi driver_name jika driver_id disediakan tanpa driver_name."""
         for vals in vals_list:
-            if vals.get('driver_id') and not vals.get('driver_name'):
-                driver = self.env['res.users'].browse(vals['driver_id'])
-                if driver.exists():
-                    vals['driver_name'] = driver.name
+            if 'driver_id' in vals and 'driver_name' not in vals:
+                if vals['driver_id']:
+                    driver = self.env['res.users'].browse(vals['driver_id'])
+                    vals['driver_name'] = driver.name if driver.exists() else False
+                else:
+                    vals['driver_name'] = False
         return super().create(vals_list)
 
     def write(self, vals):
-        """Override write untuk mempertahankan konsistensi antara driver_id dan driver_name."""
-        if vals.get('driver_id') and 'driver_name' not in vals:
-            driver = self.env['res.users'].browse(vals['driver_id'])
-            if driver.exists():
-                vals['driver_name'] = driver.name
+        """Override write untuk mempertahankan konsistensi antara driver_id dan driver_name saat update maupun unassign."""
+        if 'driver_id' in vals and 'driver_name' not in vals:
+            if vals['driver_id']:
+                driver = self.env['res.users'].browse(vals['driver_id'])
+                vals['driver_name'] = driver.name if driver.exists() else False
+            else:
+                vals['driver_name'] = False
         return super().write(vals)
 
     @api.depends(

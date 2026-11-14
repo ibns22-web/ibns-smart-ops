@@ -477,6 +477,45 @@ class TestSfaApi(HttpCase):
         self.assertIn(picking_a, manager_visible_pickings)
         self.assertIn(picking_b, manager_visible_pickings)
 
+        # 5. Uji Pengalihan Driver (Reassignment): Ubah driver_id picking_a ke sfa_driver_b tanpa menyertakan driver_name
+        picking_a.write({'driver_id': self.sfa_driver_b.id})
+        self.assertEqual(
+            picking_a.driver_name,
+            self.sfa_driver_b.name,
+            "driver_name harus otomatis tersinkronisasi saat driver_id dialihkan ke driver lain"
+        )
+        # Driver A tidak boleh lagi melihat picking_a setelah dialihkan ke Driver B
+        driver_a_visible_after = self.env['stock.picking'].with_user(self.sfa_driver).search([
+            ('id', 'in', [picking_a.id, picking_b.id])
+        ])
+        self.assertNotIn(picking_a, driver_a_visible_after, "Driver A tidak boleh lagi melihat picking_a setelah dialihkan ke Driver B")
+
+        # 6. Uji Penghapusan Driver (Unassignment): Set driver_id menjadi False
+        picking_a.write({'driver_id': False})
+        self.assertFalse(
+            picking_a.driver_name,
+            "driver_name wajib di-reset menjadi False saat driver_id dikosongkan (unassigned)"
+        )
+
+        # 7. Uji UI Onchange: Simulasi _onchange_driver_id pada form view Odoo
+        new_picking = self.env['stock.picking'].new({
+            'picking_type_id': picking_type.id,
+            'partner_id': self.test_outlet.id,
+        })
+        new_picking.driver_id = self.sfa_driver
+        new_picking._onchange_driver_id()
+        self.assertEqual(new_picking.driver_name, self.sfa_driver.name)
+
+        # Ganti driver via UI onchange saat driver_name sudah terisi sebelumnya
+        new_picking.driver_id = self.sfa_driver_b
+        new_picking._onchange_driver_id()
+        self.assertEqual(new_picking.driver_name, self.sfa_driver_b.name, "Onchange harus memperbarui driver_name saat driver diganti")
+
+        # Kosongkan driver via UI onchange
+        new_picking.driver_id = False
+        new_picking._onchange_driver_id()
+        self.assertFalse(new_picking.driver_name, "Onchange harus mengosongkan driver_name saat driver_id dihapus")
+
     # =========================================================================
     # 8. PENGUJIAN IDEMPOTENCY & SERIALISASI NULL
     # =========================================================================

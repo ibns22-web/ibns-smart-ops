@@ -16,7 +16,7 @@
 
 Operasional distribusi barang dan tim penjualan lapangan (*field sales*) kerap menghadapi beberapa kendala praktis pada implementasi ERP:
 1. **Biaya Berlangganan API Peta**: Kebutuhan kuota platform peta berbayar membengkak untuk armada dengan ribuan titik outlet. Modul ini menyematkan *iframe* OpenStreetMap (OSM) langsung di formulir partner dengan tautan langsung ke navigasi Google Maps tanpa lisensi eksternal.
-2. **Keterbatasan JSON-RPC untuk Mobile Client**: Protokol bawaan Odoo mengharuskan *stateful session* berbasis cookie. Modul ini menyediakan REST API murni (`type='http'`, `save_session=False`) berformat JSON murni yang mudah dikonsumsi aplikasi mobile (Flutter, React Native, iOS, Android).
+2. **Keterbatasan JSON-RPC untuk Mobile Client**: Meskipun endpoint eksternal `/jsonrpc` Odoo dapat dipanggil secara stateless, pemanggilannya mengharuskan payload wrapper RPC (`execute_kw`) yang mengekspos nama tabel dan method internal ORM (`res.partner`, `account.move`, `search_read`) ke aplikasi klien serta mengembalikan nilai kosong sebagai boolean `false`. REST API pada modul ini menyediakan kontrak HTTP/JSON standar industri (`GET`/`POST`, HTTP status code semantik `200`/`201`/`400`/`401`/`403`/`429`, dan sanitasi `null`) untuk konsumsi aplikasi mobile (Flutter, React Native, iOS, Android).
 3. **Ketiadaan Validasi Kehadiran Fisik (Kecurangan Check-in)**: Salesman sering melakukan check-in fiktif dari rumah/luar rute. Modul ini menerapkan **Geofencing berbasis formula Haversine** untuk memverifikasi apakah koordinat check-in berada dalam radius outlet terdaftar.
 4. **Resiko Faktur Ganda pada Jaringan Tidak Stabil**: Di area dengan sinyal lemah, pengiriman ulang (*retry*) request penagihan bisa membuat faktur berulang. Modul ini mengimplementasikan **Idempotency Guard** via header `X-Idempotency-Key`.
 5. **Celah Keamanan Superuser (`.sudo()`)**: Modul ini menolak eksekusi `sudo()` bebas dan menjalankan setiap request dalam konteks akun pengguna Odoo riil (`request.env(user=user)`), membatasi hak akses via Record Rules (`ir.rule`).
@@ -272,9 +272,9 @@ docker compose up -d
 *Catatan: Container web distandarisasi dengan nama `ibns_smart_ops_web` pada `docker-compose.yml`, dan dapat diakses langsung menggunakan perintah `docker compose exec web ...`.*
 
 ### 3. Inisialisasi & Instalasi Modul `ibns_smart_ops`
-Gunakan flag **`-i`** (*init/install*) saat menginstal modul pertama kali pada database baru (default nama database: `odoo`):
+Gunakan flag **`-i`** (*init/install*) saat menginstal modul pertama kali pada database baru (default nama database: `odoo`), dengan menyertakan flag `--http-port=8070` agar tidak bentrok (*Address already in use*) dengan proses utama Odoo di port 8069:
 ```bash
-docker compose exec web odoo -d odoo -i ibns_smart_ops --stop-after-init
+docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 -i ibns_smart_ops --stop-after-init
 docker compose restart web
 ```
 *(Ganti `odoo` dengan nama database Odoo Anda jika menggunakan nilai `DB_NAME` lain pada `.env`).*
@@ -309,7 +309,7 @@ docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 --test-tags
 
 ### 3. Cakupan Pengujian yang Divalidasi:
 1. `test_01`: Penolakan request tanpa token pada seluruh endpoint (HTTP 401).
-2. `test_02`: Penolakan token tidak valid baik via Bearer maupun header `X-IBNS-KEY` (HTTP 401).
+2. `test_02`: Penolakan token tidak valid, kedaluwarsa, maupun token berisi karakter non-ASCII/Unicode baik via Bearer maupun header `X-IBNS-KEY` dengan HTTP 401 (tanpa memicu HTTP 500).
 3. `test_03`: Autentikasi sukses via custom header `X-IBNS-KEY` (HTTP 200).
 4. `test_04`: Autentikasi sukses via standar header `Authorization: Bearer` (HTTP 200).
 5. `test_05`: **Audit Faktur & Baris Jurnal**: Memverifikasi pembukuan berpasangan (*double-entry balance*), total debit == total kredit, baris piutang usaha (*receivable line*), dan baris pendapatan (*revenue line*).
@@ -321,13 +321,23 @@ docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 --test-tags
 11. `test_11`: **Isolasi Record Rules Driver**: Driver A hanya melihat delivery order miliknya, order Driver B terfilter otomatis; Manajer melihat seluruh order.
 12. `test_12`: **Idempotency Replay**: Memverifikasi `X-Idempotency-Key` mencegah duplikasi faktur saat network retry (HTTP 200 replay).
 13. `test_13`: **Sanitasi Field Kosong**: Memverifikasi nilai kosong Odoo diserialisasi sebagai `null` (bukan boolean `false`).
-14. `test_14`: **Audit Delivered vs Invoiced**: Memverifikasi status rekonsiliasi pengiriman pada `stock.picking`.
+14. `test_14`: **Audit Delivered vs Invoiced**: Memverifikasi secara eksplisit kelima status `delivered_vs_invoiced_status` pada `stock.picking` (`no_sale_order`, `not_delivered`, `invoiced_pending_delivery`, `delivered_pending_invoice`, dan `fully_reconciled`) serta memastikan operasi penerimaan barang masuk (`incoming`) dikecualikan (`False`).
 15. `test_15`: **Fallback Chatter Odoo 18**: Memverifikasi fallback `email_from` (`noreply@ibns.local`) saat user tidak memiliki email terkonfigurasi sehingga bebas dari `UserError`.
 16. `test_16`: **Rate Guard In-Memory Cleanup**: Memverifikasi pembersihan timestamp kedaluwarsa (> 60 detik) untuk mencegah kebocoran memori (*memory leak*).
 17. `test_17`: **Idempotency SQL Constraint**: Memverifikasi proteksi balapan (*race condition*) faktur ganda di level database PostgreSQL melalui `UNIQUE (sfa_idempotency_key)`.
 18. `test_18`: **Pagination Endpoint Outlets**: Memverifikasi query parameter `limit` dan `offset` pada `GET /api/v1/sfa/outlets`.
 19. `test_19`: **Fleksibilitas Zona Outlet**: Memverifikasi record partner baru tidak memaksakan zona bawaan tertentu (*unassigned* fleksibel).
 20. `test_20`: **Rate Guard Throttling (HTTP 429)**: Memverifikasi penolakan request ke-61 dalam 60 detik per IP client.
+
+---
+
+## ⚠️ Batasan Arsitektur & Ruang Lingkup (Known Limitations)
+
+Berikut adalah 4 batasan desain modul yang perlu diperhatikan secara jujur untuk deployment dan pengembangan lanjutan:
+- **In-Memory Rate Guard pada Deployment Multi-Worker**: Penyimpanan sliding window dilakukan di memori proses Python lokal. Pada lingkungan produksi dengan `workers > 1` di `odoo.conf`, kuota dihitung per worker process; untuk klaster skala besar disarankan memadukannya dengan rate limiting di level reverse proxy (Nginx `limit_req_zone` / Cloudflare) atau Redis.
+- **Relasi Kurir Berbasis Nama (`driver_name`)**: Pencocokan Record Rule kurir pada `stock.picking` saat ini menggunakan pencocokan teks `driver_name = user.name` (`fields.Char`), belum menggunakan relasi kunci asing `Many2one('res.users')`.
+- **Faktur API Berbasis Ringkasan Nominal Tunggal**: Endpoint `POST /api/v1/sfa/invoices` menerbitkan faktur penjualan satu baris nominal (`amount` dan `description`), belum mencakup rincian multi-baris SKU produk, diskon per item, atau kalkulasi pajak bertingkat.
+- **Pratinjau Peta Statis via Iframe OpenStreetMap**: Menggunakan komputasi HTML iframe OSM standar agar bebas biaya lisensi API dan ringan, bukan komponen JS interaktif berbasis OWL (Odoo Web Library).
 
 ---
 
@@ -351,9 +361,11 @@ addons/ibns_smart_ops/
 │   └── ir.model.access.csv      # Hak akses ACL per grup (tanpa izin unlink bebas)
 ├── tests/
 │   ├── __init__.py
-│   └── test_sfa_api.py          # 17 HttpCase test suites (Rate limit, Geofence, Idempotency, RBAC, Chatter)
+│   └── test_sfa_api.py          # 20 HttpCase test suites (Rate limit, Geofence, Idempotency, RBAC, Chatter)
 └── views/
-    ├── delivery_route_views.xml # Form inherit: Tab TMS, Map Widget, & badge Delivered vs Invoiced
+    ├── account_move_views.xml   # Form & tree inherit account.move: Tab & filter Idempotency Key
+    ├── delivery_route_views.xml # Form & list inherit stock.picking: Tab TMS & badge Delivered vs Invoiced
+    ├── partner_tms_views.xml    # Form inherit res.partner: Tab TMS Geofence & widget peta OSM tersemat
     └── res_config_settings_views.xml # View konfigurasi pengaturan di Odoo Backend
 ```
 

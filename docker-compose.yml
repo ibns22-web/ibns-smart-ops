@@ -18,6 +18,7 @@ services:
       - PGPORT=5432
       - PGUSER=${DB_USER:-odoo}
       - PGPASSWORD=${DB_PASSWORD:-odoo}
+      - SFA_API_SECRET_KEY=${SFA_API_SECRET_KEY:-}
     restart: unless-stopped
 
   db:

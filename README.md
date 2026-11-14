@@ -1,5 +1,6 @@
 # IBNS Smart Logistics & SFA Engine (`ibns_smart_ops`)
 
+[![CI Test Suite](https://github.com/ibns22-web/ibns-smart-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/ibns22-web/ibns-smart-ops/actions/workflows/ci.yml)
 [![Odoo Version](https://img.shields.io/badge/Odoo-18.0_Community-875A7B?style=for-the-badge&logo=odoo&logoColor=white)](https://www.odoo.com/)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)

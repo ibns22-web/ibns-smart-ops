@@ -1,0 +1,78 @@
+name: CI Test Suite
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  odoo-18-test:
+    name: Odoo 18 Test Suite (/ibns_smart_ops)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Configuration Files
+        run: |
+          echo "Menyiapkan file konfigurasi dari template..."
+          cp .env.example .env
+          cp config/odoo.conf.template config/odoo.conf
+
+      - name: Start Database Service
+        run: |
+          echo "Menjalankan container PostgreSQL..."
+          docker compose up -d db
+          echo "Menunggu PostgreSQL siap menerima koneksi..."
+          timeout 60s bash -c 'until docker compose exec -T db pg_isready -U odoo -d odoo; do sleep 2; done'
+          echo "PostgreSQL siap!"
+
+      - name: Run Odoo 18 Test Suite
+        run: |
+          echo "Menjalankan 20 unit test suite ibns_smart_ops..."
+          docker compose run --rm --name odoo_test_runner web /entrypoint.sh odoo -d odoo --http-port=8070 -i ibns_smart_ops --test-tags=/ibns_smart_ops --test-enable --stop-after-init 2>&1 | tee test_output.log
+
+      - name: Verify Test Results & Log Output
+        run: |
+          echo "Memverifikasi output log pengujian Odoo 18..."
+
+          # 1. Pastikan file log pengujian ada dan tidak kosong
+          if [ ! -s test_output.log ]; then
+            echo "::error::File test_output.log tidak ditemukan atau kosong!"
+            exit 1
+          fi
+
+          # 2. Periksa kegagalan: tidak boleh ada '0 tests'
+          if grep -q "0 tests when loading database" test_output.log || grep -q "0 post-tests" test_output.log; then
+            echo "::error::Tidak ada test yang dieksekusi (0 tests)!"
+            exit 1
+          fi
+
+          # 3. Periksa kegagalan unit test (angka > 0 pada failed atau error)
+          if grep -E "[1-9][0-9]* failed" test_output.log || grep -E "[1-9][0-9]* error\(s\)" test_output.log; then
+            echo "::error::Ditemukan test yang gagal atau melempar error!"
+            exit 1
+          fi
+
+          # 4. Pastikan baris ringkasan kelulusan '0 failed, 0 error(s)' benar-benar tercatat
+          if ! grep -q "0 failed, 0 error(s)" test_output.log; then
+            echo "::error::Ringkasan kelulusan '0 failed, 0 error(s)' tidak ditemukan di log!"
+            exit 1
+          fi
+
+          # 5. Periksa jika ada log level ERROR atau CRITICAL pada runner
+          if grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} [0-9]+ (ERROR|CRITICAL) " test_output.log; then
+            echo "::error::Ditemukan log level ERROR atau CRITICAL pada eksekusi Odoo!"
+            exit 1
+          fi
+
+          echo "✅ Seluruh 20 unit test lolos tanpa kegagalan (0 failed, 0 errors)!"
+
+      - name: Teardown Services
+        if: always()
+        run: |
+          docker compose down -v

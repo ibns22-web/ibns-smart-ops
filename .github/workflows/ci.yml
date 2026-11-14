@@ -47,9 +47,9 @@ jobs:
             exit 1
           fi
 
-          # 2. Periksa kegagalan: tidak boleh ada '0 tests'
-          if grep -q "0 tests when loading database" test_output.log || grep -q "0 post-tests" test_output.log; then
-            echo "::error::Tidak ada test yang dieksekusi (0 tests)!"
+          # 2. Pastikan jumlah test yang dieksekusi > 0 (tidak 0 tests)
+          if grep -q " of 0 tests " test_output.log || ! grep -E " of [1-9][0-9]* tests when loading database" test_output.log; then
+            echo "::error::Tidak ada test yang dieksekusi atau terdeteksi 0 tests!"
             exit 1
           fi
 

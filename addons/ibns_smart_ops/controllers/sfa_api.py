@@ -695,20 +695,16 @@ class SfaApiController(http.Controller):
                     status=400
                 )
 
-            # Cari income account yang sesuai untuk target company
-            income_account = user_env['account.account'].search([
-                ('account_type', 'in', ('income', 'income_other')),
-                ('company_ids', 'in', [target_company.id])
-            ], limit=1)
-
+            # Gunakan default_account_id dari jurnal penjualan yang dipilih (mencegah AccessError pada
+            # account.account dan mencegah pemilihan akun pendapatan acak seperti income_other/selisih kurs)
             inv_line_vals = {
                 'name': description,
                 'quantity': 1.0,
                 'price_unit': amount,
                 'tax_ids': [(5, 0, 0)],
             }
-            if income_account:
-                inv_line_vals['account_id'] = income_account.id
+            if journal.default_account_id:
+                inv_line_vals['account_id'] = journal.default_account_id.id
 
             move_vals = {
                 'move_type': 'out_invoice',

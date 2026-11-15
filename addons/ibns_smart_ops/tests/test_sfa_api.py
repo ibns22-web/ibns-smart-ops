@@ -1234,3 +1234,39 @@ class TestSfaApi(HttpCase):
         self.assertNotIn(inv_company_c.name, str(res_cross.content))
         self.assertNotIn('Faktur Rahasia', str(res_cross.content))
 
+    def test_27_journal_default_account_used_and_no_search_accesserror(self):
+        """Memverifikasi bahwa pembuatan faktur SFA menggunakan default_account_id dari jurnal penjualan
+        tanpa melakukan pencarian manual pada model account.account:
+        1. Menjamin baris faktur terikat pada default_account_id jurnal yang sah (bukan akun acak/income_other).
+        2. Menjamin bahwa jika model account.account memicu AccessError saat di-search, endpoint tetap sukses (HTTP 201)."""
+        from unittest.mock import patch
+        from odoo.exceptions import AccessError
+
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'partner_id': self.test_outlet.id,
+            'amount': 320000.0,
+            'description': 'Pengujian Akun Pendapatan Jurnal Sah'
+        }
+
+        # Simulasikan jika hak akses pencarian account.account dibatasi (memicu AccessError)
+        def mock_account_search(self_model, domain, *args, **kwargs):
+            raise AccessError("Simulasi hak akses baca account.account dibatasi")
+
+        with patch.object(type(self.env['account.account']), 'search', side_effect=mock_account_search, autospec=True):
+            res = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload), headers=headers)
+
+        self.assertEqual(res.status_code, 201, "Pembuatan faktur harus berhasil (HTTP 201) tanpa bergantung pada search account.account")
+        invoice_id = res.json().get('invoice_id')
+        self.assertTrue(invoice_id)
+
+        inv = self.env['account.move'].browse(invoice_id)
+        # Baris faktur harus menggunakan default_account_id jurnal penjualan yang sesuai
+        if self.sale_journal.default_account_id:
+            self.assertEqual(inv.invoice_line_ids[0].account_id.id, self.sale_journal.default_account_id.id)
+        self.assertEqual(inv.invoice_line_ids[0].account_id.account_type, 'income')
+
+

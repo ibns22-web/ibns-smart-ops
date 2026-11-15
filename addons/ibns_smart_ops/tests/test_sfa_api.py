@@ -1339,5 +1339,41 @@ class TestSfaApi(HttpCase):
         self.assertEqual(res_active.status_code, 200, "Check-in harus berhasil (HTTP 200) setelah outlet aktif kembali")
         self.assertEqual(len(archived_outlet.message_ids), initial_msg_count + 1, "Chatter outlet harus bertambah 1 pesan kunjungan saat aktif")
 
+    def test_29_res_partner_crud_isolation_driver_vs_manager(self):
+        """Memverifikasi hak akses dan record rules pada res.partner antara Driver dan Manager:
+        1. SFA Manager memiliki hak penuh (create, read, write, unlink) pada partner di perusahaannya.
+        2. SFA Driver hanya memiliki hak baca dan tulis operasional, namun dilarang membuat atau menghapus partner."""
+        from odoo.exceptions import AccessError
+
+        # 1. Manager membuat outlet baru
+        mgr_partner = self.env['res.partner'].with_user(self.sfa_manager).create({
+            'name': 'Outlet Baru Dibuat Manager SFA',
+            'customer_rank': 1,
+            'company_id': self.env.company.id,
+        })
+        self.assertTrue(mgr_partner.id)
+
+        # 2. Driver mencoba menghapus outlet -> DITOLAK (AccessError)
+        with self.assertRaises(AccessError):
+            mgr_partner.with_user(self.sfa_driver).unlink()
+
+        # 3. Driver mencoba membuat outlet baru -> DITOLAK (AccessError)
+        with self.assertRaises(AccessError):
+            self.env['res.partner'].with_user(self.sfa_driver).create({
+                'name': 'Outlet Liar oleh Driver',
+                'customer_rank': 1,
+            })
+
+        # 4. Driver boleh memperbarui data operasional (misal alamat)
+        mgr_partner.with_user(self.sfa_driver).write({
+            'street': 'Jl. Riau No. 45'
+        })
+        self.assertEqual(mgr_partner.street, 'Jl. Riau No. 45')
+
+        # 5. Manager menghapus outlet -> BERHASIL
+        mgr_partner.with_user(self.sfa_manager).unlink()
+        self.assertFalse(mgr_partner.exists(), "Manager harus sukses menghapus outlet")
+
+
 
 

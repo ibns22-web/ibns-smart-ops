@@ -25,13 +25,13 @@
         </record>
     </data>
 
-    <data noupdate="1">
-        <!-- Record Rule: SFA Field Driver sees only assigned pickings via driver_id with fallback to driver_name -->
+    <data noupdate="0">
+        <!-- Record Rule: SFA Field Driver sees only assigned pickings strictly via driver_id foreign key -->
         <record id="rule_stock_picking_sfa_user" model="ir.rule">
             <field name="name">SFA User: Assigned Delivery Pickings Only</field>
             <field name="model_id" ref="stock.model_stock_picking"/>
             <field name="groups" eval="[(4, ref('group_sfa_user'))]"/>
-            <field name="domain_force">['|', ('driver_id', '=', user.id), '&amp;', ('driver_id', '=', False), ('driver_name', '=', user.name)]</field>
+            <field name="domain_force">[('driver_id', '=', user.id)]</field>
             <field name="perm_read" eval="True"/>
             <field name="perm_write" eval="True"/>
             <field name="perm_create" eval="False"/>
@@ -50,12 +50,12 @@
             <field name="perm_unlink" eval="True"/>
         </record>
 
-        <!-- Record Rule: SFA Field Driver sees only moves of assigned pickings -->
+        <!-- Record Rule: SFA Field Driver sees only moves of assigned pickings strictly via driver_id foreign key -->
         <record id="rule_stock_move_sfa_user" model="ir.rule">
             <field name="name">SFA User: Assigned Delivery Moves Only</field>
             <field name="model_id" ref="stock.model_stock_move"/>
             <field name="groups" eval="[(4, ref('group_sfa_user'))]"/>
-            <field name="domain_force">['|', ('picking_id.driver_id', '=', user.id), '&amp;', ('picking_id.driver_id', '=', False), ('picking_id.driver_name', '=', user.name)]</field>
+            <field name="domain_force">[('picking_id.driver_id', '=', user.id)]</field>
             <field name="perm_read" eval="True"/>
             <field name="perm_write" eval="False"/>
             <field name="perm_create" eval="False"/>
@@ -97,7 +97,9 @@
             <field name="perm_create" eval="True"/>
             <field name="perm_unlink" eval="True"/>
         </record>
+    </data>
 
+    <data noupdate="1">
         <!-- Dedicated System Integration User for Headless API Requests -->
         <record id="partner_sfa_api_service" model="res.partner">
             <field name="name">SFA API System Service</field>

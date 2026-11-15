@@ -75,6 +75,18 @@ class StockPicking(models.Model):
                 vals['driver_name'] = False
         return super().write(vals)
 
+    @api.model
+    def _register_hook(self):
+        """Menjamin domain_force pada rule_stock_picking_sfa_user dan rule_stock_move_sfa_user
+        secara ketat mengunci kunci asing relational driver_id = user.id dan kebal dari spoofing nama profil."""
+        super()._register_hook()
+        rule_picking = self.env.ref('ibns_smart_ops.rule_stock_picking_sfa_user', raise_if_not_found=False)
+        if rule_picking and rule_picking.domain_force != "[('driver_id', '=', user.id)]":
+            rule_picking.sudo().write({'domain_force': "[('driver_id', '=', user.id)]"})
+        rule_move = self.env.ref('ibns_smart_ops.rule_stock_move_sfa_user', raise_if_not_found=False)
+        if rule_move and rule_move.domain_force != "[('picking_id.driver_id', '=', user.id)]":
+            rule_move.sudo().write({'domain_force': "[('picking_id.driver_id', '=', user.id)]"})
+
     @api.depends(
         'state',
         'delivery_status',

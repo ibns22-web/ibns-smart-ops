@@ -1374,6 +1374,60 @@ class TestSfaApi(HttpCase):
         mgr_partner.with_user(self.sfa_manager).unlink()
         self.assertFalse(mgr_partner.exists(), "Manager harus sukses menghapus outlet")
 
+    def test_30_driver_name_spoofing_prevention(self):
+        """Memverifikasi penghapusan fallback teks driver_name pada rule_stock_picking_sfa_user:
+        1. Pengiriman yang memiliki driver_name teks tetapi driver_id = False TIDAK BOLEH terlihat oleh driver,
+           mencegah klaim pengiriman tidak sah.
+        2. Pengguna Driver A yang mengubah nama profilnya agar sama persis dengan Driver B TETAP TIDAK BISA
+           melihat pengiriman Driver B (karena Record Rule sepenuhnya mengunci pada kunci asing driver_id = user.id)."""
+        picking_type = self.env['stock.picking.type'].search([('code', '=', 'outgoing')], limit=1)
+        if not picking_type:
+            return
+
+        # 1. Buat pengiriman unassigned dengan teks driver_name = sfa_driver.name tetapi driver_id = False
+        picking_spoof_target = self.env['stock.picking'].create({
+            'picking_type_id': picking_type.id,
+            'partner_id': self.test_outlet.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': self.test_outlet.property_stock_customer.id,
+            'driver_id': False,
+            'driver_name': self.sfa_driver.name,
+        })
+        self.assertFalse(picking_spoof_target.driver_id)
+
+        # Driver A mencari pengiriman -> TIDAK BOLEH menemukan picking_spoof_target
+        driver_a_pickings = self.env['stock.picking'].with_user(self.sfa_driver).search([
+            ('id', '=', picking_spoof_target.id)
+        ])
+        self.assertNotIn(picking_spoof_target, driver_a_pickings,
+                         "Driver tidak boleh melihat pengiriman tanpa relasi driver_id yang valid meski driver_name cocok")
+
+        # 2. Buat pengiriman sah milik Driver B
+        picking_driver_b = self.env['stock.picking'].create({
+            'picking_type_id': picking_type.id,
+            'partner_id': self.test_outlet.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': self.test_outlet.property_stock_customer.id,
+            'driver_id': self.sfa_driver_b.id,
+            'driver_name': self.sfa_driver_b.name,
+        })
+
+        # Simulasikan Driver A mengubah namanya menjadi nama Driver B di profil / Preferences
+        original_name_a = self.sfa_driver.name
+        try:
+            self.sfa_driver.write({'name': self.sfa_driver_b.name})
+            self.assertEqual(self.sfa_driver.name, self.sfa_driver_b.name)
+
+            # Driver A yang sudah berganti nama mencari tugas Driver B -> TETAP TERBLOKIR
+            driver_a_spoofed_view = self.env['stock.picking'].with_user(self.sfa_driver).search([
+                ('id', '=', picking_driver_b.id)
+            ])
+            self.assertNotIn(picking_driver_b, driver_a_spoofed_view,
+                             "Spoofing nama profil user tidak boleh membocorkan pengiriman driver lain")
+        finally:
+            self.sfa_driver.write({'name': original_name_a})
+
+
 
 
 

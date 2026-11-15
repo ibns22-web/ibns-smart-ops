@@ -1006,3 +1006,63 @@ class TestSfaApi(HttpCase):
                                                   headers=headers)
         self.assertEqual(res_inv_amount_bool_false.status_code, 400, "amount boolean false harus ditolak dengan HTTP 400")
 
+    def test_24_default_tax_exclusion_and_amount_total_guarantee(self):
+        """Memverifikasi bahwa baris faktur SFA yang dibuat via API mengeksklusikan pajak bawaan
+        ('tax_ids': [(5, 0, 0)]), sehingga nominal tagihan yang dikirim klien (amount) tetap bersih
+        dan tidak digelembungkan oleh pajak penjualan otomatis (PPN) dari akun pendapatan."""
+        # 1. Cari atau buat pajak penjualan (misal PPN 11%)
+        sale_tax = self.env['account.tax'].search([
+            ('type_tax_use', '=', 'sale'),
+            ('company_id', '=', self.env.company.id)
+        ], limit=1)
+        if not sale_tax:
+            sale_tax = self.env['account.tax'].create({
+                'name': 'PPN Penjualan 11%',
+                'amount_type': 'percent',
+                'amount': 11.0,
+                'type_tax_use': 'sale',
+                'company_id': self.env.company.id,
+            })
+
+        # 2. Pasang pajak penjualan tersebut pada akun pendapatan default
+        income_acc = self.sale_journal.default_account_id
+        if not income_acc:
+            income_acc = self.env['account.account'].search([
+                ('account_type', 'in', ('income', 'income_other')),
+                ('company_ids', 'in', [self.env.company.id])
+            ], limit=1)
+
+        orig_taxes = False
+        if income_acc:
+            orig_taxes = income_acc.tax_ids.ids
+            income_acc.write({'tax_ids': [(4, sale_tax.id)]})
+
+        try:
+            headers = {
+                'X-IBNS-KEY': self.valid_token,
+                'Content-Type': 'application/json',
+            }
+            target_amount = 500000.0
+            payload = {
+                'partner_id': self.test_outlet.id,
+                'amount': target_amount,
+                'description': 'Tagihan Lapangan Bersih Tanpa Inflasi Pajak'
+            }
+            res = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload), headers=headers)
+            self.assertEqual(res.status_code, 201)
+
+            invoice_id = res.json().get('invoice_id')
+            self.assertTrue(invoice_id)
+            inv = self.env['account.move'].browse(invoice_id)
+
+            # Verifikasi nominal faktur harus tepat sama dengan target_amount (500.000), BUKAN 555.000
+            self.assertEqual(inv.amount_total, target_amount, "amount_total faktur tidak boleh terinflasi oleh pajak otomatis")
+            self.assertEqual(inv.amount_untaxed, target_amount)
+            self.assertEqual(inv.amount_tax, 0.0, "amount_tax harus bernilai 0.0")
+
+            # Verifikasi baris faktur tidak mengikat pajak
+            self.assertEqual(len(inv.invoice_line_ids[0].tax_ids), 0, "Line invoice tidak boleh memiliki tax_ids")
+        finally:
+            if income_acc and orig_taxes is not False:
+                income_acc.write({'tax_ids': [(6, 0, orig_taxes)]})
+

@@ -679,6 +679,7 @@ class SfaApiController(http.Controller):
                 'name': description,
                 'quantity': 1.0,
                 'price_unit': amount,
+                'tax_ids': [(5, 0, 0)],
             }
             if income_account:
                 inv_line_vals['account_id'] = income_account.id

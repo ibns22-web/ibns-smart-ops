@@ -651,26 +651,34 @@ class SfaApiController(http.Controller):
         user_env = self._get_user_env(user, target_company=target_company)
         partner = partner.with_env(user_env)
 
-        # Idempotency Check: Cegah duplikasi tagihan (evaluasi global konsisten dengan SQL constraint)
+        # Idempotency Check: Cegah duplikasi tagihan dalam cakupan hak akses user & allowed companies
         if idempotency_key:
-            existing_move = request.env['account.move'].sudo().search([
-                ('sfa_idempotency_key', '=', idempotency_key),
-            ], limit=1)
-            if existing_move:
-                _logger.info("Idempotent replay detected for key '%s'. Returning existing invoice %s",
-                             idempotency_key, existing_move.name)
+            try:
+                existing_move = user_env['account.move'].search([
+                    ('sfa_idempotency_key', '=', idempotency_key),
+                ], limit=1)
+                if existing_move:
+                    _logger.info("Idempotent replay detected for key '%s'. Returning existing invoice %s",
+                                 idempotency_key, existing_move.name)
+                    return Response(
+                        json.dumps({
+                            "status": "success",
+                            "invoice_id": existing_move.id,
+                            "invoice_name": existing_move.name,
+                            "amount_total": existing_move.amount_total,
+                            "state": existing_move.state,
+                            "created_by": existing_move.create_uid.name or user.name,
+                            "idempotent_replay": True
+                        }),
+                        content_type="application/json;charset=utf-8",
+                        status=200
+                    )
+            except AccessError as ae:
+                _logger.warning("AccessError during idempotency check by user %s: %s", user.login, str(ae))
                 return Response(
-                    json.dumps({
-                        "status": "success",
-                        "invoice_id": existing_move.id,
-                        "invoice_name": existing_move.name,
-                        "amount_total": existing_move.amount_total,
-                        "state": existing_move.state,
-                        "created_by": existing_move.create_uid.name or user.name,
-                        "idempotent_replay": True
-                    }),
+                    json.dumps({"status": "error", "message": f"Forbidden: Insufficient permissions to access invoices ({str(ae)})"}),
                     content_type="application/json;charset=utf-8",
-                    status=200
+                    status=403
                 )
 
         try:
@@ -752,28 +760,35 @@ class SfaApiController(http.Controller):
             user_env.cr.rollback()
             # Race condition handling: tangani request paralel dengan Idempotency-Key yang sama persis
             if idempotency_key:
-                existing_move = request.env['account.move'].sudo().search([
-                    ('sfa_idempotency_key', '=', idempotency_key),
-                ], limit=1)
-                if existing_move:
-                    _logger.info("Concurrent race-condition resolved for idempotency key '%s'. Returning existing invoice %s",
-                                 idempotency_key, existing_move.name)
+                try:
+                    existing_move = user_env['account.move'].search([
+                        ('sfa_idempotency_key', '=', idempotency_key),
+                    ], limit=1)
+                    if existing_move:
+                        _logger.info("Concurrent race-condition resolved for idempotency key '%s'. Returning existing invoice %s",
+                                     idempotency_key, existing_move.name)
+                        return Response(
+                            json.dumps({
+                                "status": "success",
+                                "invoice_id": existing_move.id,
+                                "invoice_name": existing_move.name,
+                                "amount_total": existing_move.amount_total,
+                                "state": existing_move.state,
+                                "created_by": existing_move.create_uid.name or user.name,
+                                "idempotent_replay": True
+                            }),
+                            content_type="application/json;charset=utf-8",
+                            status=200
+                        )
+                except AccessError:
                     return Response(
-                        json.dumps({
-                            "status": "success",
-                            "invoice_id": existing_move.id,
-                            "invoice_name": existing_move.name,
-                            "amount_total": existing_move.amount_total,
-                            "state": existing_move.state,
-                            "created_by": existing_move.create_uid.name or user.name,
-                            "idempotent_replay": True
-                        }),
+                        json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to access invoices"}),
                         content_type="application/json;charset=utf-8",
-                        status=200
+                        status=403
                     )
             _logger.warning("Database integrity constraint violated during invoice creation: %s", str(ie))
             return Response(
-                json.dumps({"status": "error", "message": "Database integrity constraint violated"}),
+                json.dumps({"status": "error", "message": "Idempotency key collision or database constraint violated"}),
                 content_type="application/json;charset=utf-8",
                 status=409
             )

@@ -1115,3 +1115,122 @@ class TestSfaApi(HttpCase):
                                       headers=headers)
         self.assertEqual(res_no_coords.status_code, 200, "Check-in tanpa koordinat GPS tetap diizinkan (HTTP 200)")
 
+    def test_26_rbac_and_multicompany_idempotency_isolation(self):
+        """Memverifikasi penghapusan .sudo() pada pemeriksaan idempotency:
+        1. RBAC Enforced: Driver (group_sfa_user) tanpa hak akses billing tidak dapat membocorkan
+           detail faktur (invoice_id, invoice_name, amount) dengan mengirimkan idempotency key yang sudah ada;
+           harus ditolak dengan HTTP 403 Forbidden.
+        2. Multi-Company Isolation: Jika idempotency key sudah digunakan oleh perusahaan lain (Perusahaan C)
+           yang tidak diakses oleh pengguna, pencarian idempotency tidak boleh mengembalikan faktur perusahaan C.
+           Saat request menabrak constraint unik di database, sistem harus mengembalikan HTTP 409 Conflict
+           tanpa membocorkan detail faktur perusahaan C (tidak ada replay HTTP 200 lintas entitas)."""
+        # --- Bagian 1: Pengujian Batasan RBAC Driver ---
+        # 1. Buat faktur sah oleh manager dengan idempotency key rahasia
+        secret_key = f"SECRET-INV-KEY-{uuid.uuid4().hex}"
+        manager_headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': secret_key,
+        }
+        res_create = self.url_open('/api/v1/sfa/invoices',
+                                   data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 150000.0}),
+                                   headers=manager_headers)
+        self.assertEqual(res_create.status_code, 201)
+        invoice_id = res_create.json().get('invoice_id')
+        self.assertTrue(invoice_id)
+
+        # 2. Driver mencoba probing key faktur tersebut via endpoint /api/v1/sfa/invoices
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', self.driver_token)
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', str(self.sfa_driver.id))
+
+        driver_headers = {
+            'X-IBNS-KEY': self.driver_token,
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': secret_key,
+        }
+        try:
+            res_driver_probe = self.url_open('/api/v1/sfa/invoices',
+                                             data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 150000.0}),
+                                             headers=driver_headers)
+            # Driver HARUS ditolak dengan HTTP 403, BUKAN HTTP 200 (yang akan membocorkan data faktur)
+            self.assertEqual(res_driver_probe.status_code, 403, "Driver tanpa izin billing harus mendapat HTTP 403 saat replay key")
+            self.assertIn("Insufficient permissions", res_driver_probe.json().get("message", ""))
+        finally:
+            # Kembalikan konfigurasi token ke manager
+            self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', self.valid_token)
+            self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', str(self.sfa_manager.id))
+
+        # --- Bagian 2: Pengujian Multi-Company Data Leak Isolation ---
+        # Buat Perusahaan C (terpisah sama sekali dari manager)
+        company_c = self.env['res.company'].create({
+            'name': 'Perusahaan C Terisolasi',
+            'currency_id': self.env.ref('base.IDR').id if self.env.ref('base.IDR', raise_if_not_found=False) else self.env.company.currency_id.id,
+        })
+        income_acc_c = self.env['account.account'].create({
+            'name': 'Pendapatan Perusahaan C',
+            'code': f'498{uuid.uuid4().hex[:4]}',
+            'account_type': 'income',
+            'company_ids': [(6, 0, [company_c.id])],
+        })
+        receivable_acc_c = self.env['account.account'].create({
+            'name': 'Piutang Perusahaan C',
+            'code': f'112{uuid.uuid4().hex[:4]}',
+            'account_type': 'asset_receivable',
+            'company_ids': [(6, 0, [company_c.id])],
+            'reconcile': True,
+        })
+        journal_c = self.env['account.journal'].create({
+            'name': 'Penjualan Perusahaan C',
+            'type': 'sale',
+            'code': f'SC{uuid.uuid4().hex[:2]}',
+            'company_id': company_c.id,
+            'default_account_id': income_acc_c.id,
+        })
+        partner_c = self.env['res.partner'].create({
+            'name': 'Pelanggan Rahasia Perusahaan C',
+            'company_id': company_c.id,
+            'property_account_receivable_id': receivable_acc_c.id,
+        })
+
+        cross_key = f"CROSS-COMPANY-KEY-{uuid.uuid4().hex}"
+        # Buat faktur langsung di Perusahaan C dengan cross_key
+        inv_company_c = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'partner_id': partner_c.id,
+            'company_id': company_c.id,
+            'journal_id': journal_c.id,
+            'invoice_date': self.env.cr.now().date(),
+            'invoice_date_due': self.env.cr.now().date(),
+            'sfa_idempotency_key': cross_key,
+            'invoice_line_ids': [
+                (0, 0, {
+                    'name': 'Faktur Rahasia Perusahaan C',
+                    'quantity': 1.0,
+                    'price_unit': 999000.0,
+                    'account_id': income_acc_c.id,
+                    'tax_ids': [(5, 0, 0)],
+                })
+            ]
+        })
+        inv_company_c.action_post()
+
+        # Pastikan sfa_manager TIDAK memiliki akses ke Perusahaan C
+        self.assertNotIn(company_c.id, self.sfa_manager.company_ids.ids)
+
+        # Manager di Perusahaan A mengirim request invoice baru dengan cross_key milik Perusahaan C
+        conflict_headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': cross_key,
+        }
+        with mute_logger('odoo.sql_db'):
+            res_cross = self.url_open('/api/v1/sfa/invoices',
+                                      data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 200000.0}),
+                                      headers=conflict_headers)
+
+        # Harus mengembalikan HTTP 409 Conflict karena tabrakan database constraint unik,
+        # BUKAN HTTP 200 replay yang membocorkan isi data inv_company_c!
+        self.assertEqual(res_cross.status_code, 409, "Cross-company idempotency collision harus mengembalikan HTTP 409")
+        self.assertNotIn(inv_company_c.name, str(res_cross.content))
+        self.assertNotIn('Faktur Rahasia', str(res_cross.content))
+

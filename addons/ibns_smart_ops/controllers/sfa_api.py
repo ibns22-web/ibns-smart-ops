@@ -255,6 +255,36 @@ class SfaApiController(http.Controller):
                 status=401
             )
 
+    def _get_user_env(self, user, target_company=None):
+        """Membangun environment Odoo untuk user terautentikasi dengan konteks multi-company yang valid.
+        Memastikan 'allowed_company_ids' selalu terisi dari user.company_ids agar tidak terblokir
+        oleh Record Rules multi-company, dan menempatkan target_company di urutan pertama sebagai active company.
+        Mendukung juga preferensi company via header 'X-Company-Id'.
+        """
+        user_companies = user.company_ids
+        if not user_companies:
+            user_companies = user.company_id
+
+        if target_company and target_company in user_companies:
+            active_company = target_company
+        else:
+            header_cid = request.httprequest.headers.get('X-Company-Id')
+            active_company = None
+            if header_cid:
+                try:
+                    cid = int(header_cid)
+                    match_comp = user_companies.filtered(lambda c: c.id == cid)
+                    if match_comp:
+                        active_company = match_comp[0]
+                except (ValueError, TypeError):
+                    pass
+            if not active_company:
+                active_company = user.company_id if user.company_id in user_companies else user_companies[0]
+
+        allowed_ids = [active_company.id] + [cid for cid in user_companies.ids if cid != active_company.id]
+        ctx = dict(request.env.context, allowed_company_ids=allowed_ids)
+        return request.env(user=user, context=ctx)
+
     @http.route('/api/v1/sfa/outlets', type='http', auth='public', methods=['GET'], csrf=False, save_session=False)
     def get_outlets(self, **kwargs):
         """Mengambil daftar outlet/pelanggan lengkap beserta koordinat GPS dengan dukungan pagination.
@@ -272,7 +302,7 @@ class SfaApiController(http.Controller):
         if auth_error:
             return auth_error
 
-        user_env = request.env(user=user)
+        user_env = self._get_user_env(user)
 
         # Parsing parameter pagination
         try:
@@ -370,7 +400,7 @@ class SfaApiController(http.Controller):
                 status=400
             )
 
-        user_env = request.env(user=user)
+        user_env = self._get_user_env(user)
 
         try:
             partner = user_env['res.partner'].browse(int(outlet_id))
@@ -380,6 +410,9 @@ class SfaApiController(http.Controller):
                     content_type="application/json;charset=utf-8",
                     status=404
                 )
+            if partner.company_id and partner.company_id in user.company_ids and partner.company_id != user_env.company:
+                user_env = self._get_user_env(user, target_company=partner.company_id)
+                partner = partner.with_env(user_env)
         except (ValueError, TypeError):
             return Response(
                 json.dumps({"status": "error", "message": "Invalid outlet_id format"}),
@@ -550,7 +583,7 @@ class SfaApiController(http.Controller):
         if idempotency_key:
             idempotency_key = str(idempotency_key).strip()
 
-        user_env = request.env(user=user)
+        user_env = self._get_user_env(user)
 
         try:
             partner = user_env['res.partner'].browse(int(partner_id))
@@ -573,6 +606,11 @@ class SfaApiController(http.Controller):
                 content_type="application/json;charset=utf-8",
                 status=403
             )
+
+        # Evaluasi target company berdasarkan partner (atau fallback active company user)
+        target_company = partner.company_id if partner.company_id and partner.company_id in user.company_ids else user_env.company
+        user_env = self._get_user_env(user, target_company=target_company)
+        partner = partner.with_env(user_env)
 
         # Idempotency Check: Cegah duplikasi tagihan (evaluasi global konsisten dengan SQL constraint)
         if idempotency_key:
@@ -599,7 +637,7 @@ class SfaApiController(http.Controller):
         try:
             journal = user_env['account.journal'].search([
                 ('type', '=', 'sale'),
-                ('company_id', '=', partner.company_id.id or user_env.company.id)
+                ('company_id', '=', target_company.id)
             ], limit=1)
             if not journal:
                 journal = user_env['account.journal'].search([('type', '=', 'sale')], limit=1)
@@ -610,18 +648,27 @@ class SfaApiController(http.Controller):
                     status=400
                 )
 
+            # Cari income account yang sesuai untuk target company
+            income_account = user_env['account.account'].search([
+                ('account_type', 'in', ('income', 'income_other')),
+                ('company_ids', 'in', [target_company.id])
+            ], limit=1)
+
+            inv_line_vals = {
+                'name': description,
+                'quantity': 1.0,
+                'price_unit': amount,
+            }
+            if income_account:
+                inv_line_vals['account_id'] = income_account.id
+
             move_vals = {
                 'move_type': 'out_invoice',
                 'partner_id': partner.id,
+                'company_id': target_company.id,
                 'journal_id': journal.id,
                 'invoice_date': fields.Date.context_today(partner),
-                'invoice_line_ids': [
-                    (0, 0, {
-                        'name': description,
-                        'quantity': 1.0,
-                        'price_unit': amount,
-                    })
-                ],
+                'invoice_line_ids': [(0, 0, inv_line_vals)],
             }
             if idempotency_key:
                 move_vals['sfa_idempotency_key'] = idempotency_key

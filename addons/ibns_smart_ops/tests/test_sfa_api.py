@@ -873,3 +873,96 @@ class TestSfaApi(HttpCase):
         self.assertEqual(res_data.get('invoice_id'), first_invoice.id)
         self.assertTrue(res_data.get('idempotent_replay'))
 
+    def test_22_multi_company_allowed_company_ids_invoice_creation(self):
+        """Memverifikasi penanganan multi-company dan allowed_company_ids:
+        1. get_outlets() membaca partner milik Perusahaan B jika user memiliki hak ke Perusahaan B.
+        2. sync_visit_data() mencatat kunjungan pada partner milik Perusahaan B tanpa AccessError.
+        3. create_invoice() berhasil menerbitkan faktur untuk partner milik Perusahaan B dengan
+           company_id dan jurnal Perusahaan B yang sesuai (bebas dari error Incompatible companies)."""
+        # 1. Setup Perusahaan B
+        company_b = self.env['res.company'].create({
+            'name': 'IBNS Distribusi Cabang B',
+            'currency_id': self.env.ref('base.IDR').id if self.env.ref('base.IDR', raise_if_not_found=False) else self.env.company.currency_id.id,
+        })
+
+        # Setup Akun Penjualan & Piutang untuk Perusahaan B (kode alfanumerik tanpa underscore)
+        income_account_b = self.env['account.account'].create({
+            'name': 'Pendapatan Penjualan Cabang B',
+            'code': f'499{uuid.uuid4().hex[:4]}',
+            'account_type': 'income',
+            'company_ids': [(6, 0, [company_b.id])],
+        })
+        receivable_account_b = self.env['account.account'].create({
+            'name': 'Piutang Usaha Cabang B',
+            'code': f'111{uuid.uuid4().hex[:4]}',
+            'account_type': 'asset_receivable',
+            'company_ids': [(6, 0, [company_b.id])],
+            'reconcile': True,
+        })
+
+        # Setup Sale Journal untuk Perusahaan B
+        journal_b = self.env['account.journal'].create({
+            'name': 'Penjualan Cabang B',
+            'type': 'sale',
+            'code': 'SALB',
+            'company_id': company_b.id,
+            'default_account_id': income_account_b.id,
+        })
+
+        # Berikan akses ke Perusahaan B pada sfa_manager
+        self.sfa_manager.write({
+            'company_ids': [(4, company_b.id)]
+        })
+
+        # Buat Partner milik Perusahaan B
+        partner_b = self.env['res.partner'].create({
+            'name': 'Outlet Eksklusif Cabang B',
+            'customer_rank': 1,
+            'company_id': company_b.id,
+            'street': 'Jl. Diponegoro No. 25',
+            'city': 'Surabaya',
+            'partner_latitude': -7.257472,
+            'partner_longitude': 112.752088,
+            'geofence_radius_meters': 200.0,
+            'property_account_receivable_id': receivable_account_b.id,
+        })
+
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+
+        # 1. GET /api/v1/sfa/outlets harus menyertakan partner_b
+        res_outlets = self.url_open('/api/v1/sfa/outlets', headers=headers)
+        self.assertEqual(res_outlets.status_code, 200)
+        outlet_ids = [o['id'] for o in res_outlets.json().get('outlets', [])]
+        self.assertIn(partner_b.id, outlet_ids, "Partner milik Cabang B harus terbaca dalam daftar outlet")
+
+        # 2. POST /api/v1/sfa/sync-visit harus berhasil mencatat check-in pada partner_b tanpa AccessError
+        payload_visit = {
+            'outlet_id': partner_b.id,
+            'checkin_latitude': -7.257500,
+            'checkin_longitude': 112.752100,
+            'notes': 'Salesman check-in di outlet Cabang B'
+        }
+        res_visit = self.url_open('/api/v1/sfa/sync-visit', data=json.dumps(payload_visit), headers=headers)
+        self.assertEqual(res_visit.status_code, 200, "Sync visit pada partner Cabang B harus berhasil (HTTP 200)")
+        self.assertEqual(res_visit.json().get('status'), 'success')
+
+        # 3. POST /api/v1/sfa/invoices harus berhasil membuat dan mem-posting faktur untuk partner_b di Cabang B
+        payload_inv = {
+            'partner_id': partner_b.id,
+            'amount': 750000.0,
+            'description': 'Penagihan Multi-Company Cabang B'
+        }
+        res_inv = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_inv), headers=headers)
+        self.assertEqual(res_inv.status_code, 201, "Faktur multi-company harus berhasil terbuat (HTTP 201)")
+        inv_data = res_inv.json()
+        invoice_id = inv_data.get('invoice_id')
+        self.assertTrue(invoice_id)
+
+        created_invoice = self.env['account.move'].browse(invoice_id)
+        self.assertEqual(created_invoice.company_id.id, company_b.id, "Faktur harus terbit di bawah Perusahaan B")
+        self.assertEqual(created_invoice.journal_id.id, journal_b.id, "Faktur harus menggunakan jurnal Perusahaan B")
+        self.assertEqual(created_invoice.state, 'posted', "Faktur harus sukses terposting (posted)")
+

@@ -48,11 +48,21 @@ class ResPartner(models.Model):
     @api.depends('partner_latitude', 'partner_longitude')
     def _compute_map_embed(self):
         for rec in self:
-            if rec.partner_latitude and rec.partner_longitude:
+            has_coords = (
+                rec.partner_latitude is not False and rec.partner_latitude is not None and
+                rec.partner_longitude is not False and rec.partner_longitude is not None
+            )
+            # Izinkan koordinat di garis khatulistiwa (lat=0.0) atau meridian utama (lon=0.0),
+            # tolak hanya jika kedua koordinat adalah (0.0, 0.0) / Null Island.
+            if has_coords and (rec.partner_latitude != 0.0 or rec.partner_longitude != 0.0):
                 # Konversi float eksplisit untuk menutup potensi celah XSS injeksi URL
                 lat = float(rec.partner_latitude)
                 lon = float(rec.partner_longitude)
-                bbox = f"{lon - 0.005:.7f},{lat - 0.005:.7f},{lon + 0.005:.7f},{lat + 0.005:.7f}"
+                min_lon = max(-180.0, lon - 0.005)
+                min_lat = max(-90.0, lat - 0.005)
+                max_lon = min(180.0, lon + 0.005)
+                max_lat = min(90.0, lat + 0.005)
+                bbox = f"{min_lon:.7f},{min_lat:.7f},{max_lon:.7f},{max_lat:.7f}"
                 rec.map_embed_html = Markup(f'''
                     <div style="margin-top: 10px; border-radius: 8px; overflow: hidden; border: 1px solid #ccc;">
                         <iframe width="100%" height="280" frameborder="0" scrolling="no" marginheight="0" marginwidth="0" 

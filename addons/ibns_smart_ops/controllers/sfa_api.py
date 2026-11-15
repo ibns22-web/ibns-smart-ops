@@ -90,14 +90,28 @@ class SfaApiController(http.Controller):
 
     def _sanitize_record(self, data):
         """Mengubah representasi nilai False internal Odoo dan koordinat kosong menjadi None (null di JSON).
-        Koordinat bernilai 0.0, False, atau None dikonversi menjadi null agar tidak disalahartikan
-        sebagai koordinat valid (Null Island).
+        Koordinat bernilai (0.0, 0.0) (Null Island), False, atau None dikonversi menjadi null.
+        Namun jika salah satu koordinat valid dan pasangannya 0.0 (misal di garis khatulistiwa lat=0.0
+        atau meridian utama lon=0.0), nilai 0.0 tetap dipertahankan sebagai koordinat valid.
         Mencegah error parsing tipe data pada klien mobile akibat field kosong terkirim sebagai boolean false.
         """
         if isinstance(data, dict):
             res = {}
+            has_lat = 'partner_latitude' in data
+            has_lon = 'partner_longitude' in data
+            is_null_island = False
+            if has_lat and has_lon:
+                lat_val = data.get('partner_latitude')
+                lon_val = data.get('partner_longitude')
+                is_null_island = (lat_val in (False, None, 0.0)) and (lon_val in (False, None, 0.0))
+
             for k, v in data.items():
-                if k in ('partner_latitude', 'partner_longitude') and (v is False or v is None or v == 0.0):
+                if k in ('partner_latitude', 'partner_longitude'):
+                    if is_null_island or v is False or v is None:
+                        res[k] = None
+                    else:
+                        res[k] = v
+                elif v is False:
                     res[k] = None
                 else:
                     res[k] = self._sanitize_record(v)
@@ -387,12 +401,19 @@ class SfaApiController(http.Controller):
         geofence_info = None
         geofence_badge = ""
 
-        if raw_lat is not None and raw_lon is not None:
+        if (
+            raw_lat is not None and not isinstance(raw_lat, bool) and
+            raw_lon is not None and not isinstance(raw_lon, bool)
+        ):
             try:
                 checkin_lat = float(raw_lat)
                 checkin_lon = float(raw_lon)
                 if math.isfinite(checkin_lat) and math.isfinite(checkin_lon):
-                    if partner.partner_latitude and partner.partner_longitude:
+                    has_partner_coords = (
+                        partner.partner_latitude is not False and partner.partner_latitude is not None and
+                        partner.partner_longitude is not False and partner.partner_longitude is not None
+                    )
+                    if has_partner_coords and (partner.partner_latitude != 0.0 or partner.partner_longitude != 0.0):
                         dist_m = _calculate_haversine_distance(
                             checkin_lat, checkin_lon,
                             partner.partner_latitude, partner.partner_longitude

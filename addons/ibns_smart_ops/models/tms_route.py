@@ -109,12 +109,14 @@ class StockPicking(models.Model):
         'state',
         'delivery_status',
         'picking_type_id.code',
+        'move_ids.sale_line_id',
+        'move_ids.sale_line_id.qty_delivered',
+        'move_ids.sale_line_id.qty_invoiced',
         'sale_id',
-        'sale_id.invoice_status',
         'sale_id.invoice_ids.state',
         'sale_id.invoice_ids.move_type',
         'sale_id.order_line.qty_delivered',
-        'sale_id.order_line.qty_invoiced'
+        'sale_id.order_line.qty_invoiced',
     )
     def _compute_delivered_vs_invoiced_status(self):
         for picking in self:
@@ -133,20 +135,22 @@ class StockPicking(models.Model):
             )
             has_posted_invoices = bool(posted_invoices)
 
-            lines = picking.sale_id.order_line.filtered(lambda l: not l.display_type)
-            total_delivered = sum(lines.mapped('qty_delivered'))
-            total_invoiced = sum(lines.mapped('qty_invoiced'))
+            # Evaluasi khusus baris SO yang terkait dengan move pada picking ini
+            sale_lines = picking.move_ids.mapped('sale_line_id').filtered(lambda l: not l.display_type)
+            if not sale_lines:
+                sale_lines = picking.sale_id.order_line.filtered(lambda l: not l.display_type)
 
-            if not is_delivered and not has_posted_invoices:
-                picking.delivered_vs_invoiced_status = 'not_delivered'
-            elif not is_delivered and has_posted_invoices:
-                picking.delivered_vs_invoiced_status = 'invoiced_pending_delivery'
-            elif is_delivered and not has_posted_invoices:
-                picking.delivered_vs_invoiced_status = 'delivered_pending_invoice'
-            elif is_delivered and has_posted_invoices:
-                if picking.sale_id.invoice_status == 'invoiced' or (total_invoiced >= total_delivered and total_delivered > 0):
+            total_delivered = sum(sale_lines.mapped('qty_delivered'))
+            total_invoiced = sum(sale_lines.mapped('qty_invoiced'))
+
+            if not is_delivered:
+                # Hanya tandai invoiced_pending_delivery jika total tagihan melebihi total barang yang sudah terkirim
+                if has_posted_invoices and total_invoiced > total_delivered:
+                    picking.delivered_vs_invoiced_status = 'invoiced_pending_delivery'
+                else:
+                    picking.delivered_vs_invoiced_status = 'not_delivered'
+            else:
+                if has_posted_invoices and total_delivered > 0 and total_invoiced >= total_delivered:
                     picking.delivered_vs_invoiced_status = 'fully_reconciled'
                 else:
                     picking.delivered_vs_invoiced_status = 'delivered_pending_invoice'
-            else:
-                picking.delivered_vs_invoiced_status = 'not_delivered'

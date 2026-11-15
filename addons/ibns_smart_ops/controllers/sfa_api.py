@@ -411,9 +411,9 @@ class SfaApiController(http.Controller):
 
         try:
             partner = user_env['res.partner'].browse(int(outlet_id))
-            if not partner.exists():
+            if not partner.exists() or not partner.active:
                 return Response(
-                    json.dumps({"status": "error", "message": "Outlet not found"}),
+                    json.dumps({"status": "error", "message": "Outlet not found or archived"}),
                     content_type="application/json;charset=utf-8",
                     status=404
                 )

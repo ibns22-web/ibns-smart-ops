@@ -1269,4 +1269,42 @@ class TestSfaApi(HttpCase):
             self.assertEqual(inv.invoice_line_ids[0].account_id.id, self.sale_journal.default_account_id.id)
         self.assertEqual(inv.invoice_line_ids[0].account_id.account_type, 'income')
 
+    def test_28_sync_visit_rejects_archived_outlet(self):
+        """Memverifikasi bahwa POST /api/v1/sfa/sync-visit menolak pencatatan kunjungan (check-in)
+        ke outlet yang telah dinonaktifkan atau diarsipkan (active=False) dengan HTTP 404."""
+        # 1. Buat outlet baru khusus dan nonaktifkan (arsip)
+        archived_outlet = self.env['res.partner'].create({
+            'name': 'Outlet Sudah Tutup / Diarsipkan',
+            'customer_rank': 1,
+            'active': False,
+        })
+        self.assertFalse(archived_outlet.active)
+        initial_msg_count = len(archived_outlet.message_ids)
+
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'outlet_id': archived_outlet.id,
+            'notes': 'Sales mencoba check-in ke outlet yang sudah diarsipkan.'
+        }
+
+        # 2. Kirim request sync-visit ke outlet yang diarsipkan
+        res = self.url_open('/api/v1/sfa/sync-visit', data=json.dumps(payload), headers=headers)
+
+        # Harus ditolak dengan status HTTP 404
+        self.assertEqual(res.status_code, 404, "Kunjungan ke outlet non-aktif/diarsipkan harus ditolak dengan HTTP 404")
+        self.assertIn('Outlet not found', res.json().get('message', ''))
+
+        # Verifikasi tidak ada pesan tambahan yang terposting pada chatter outlet yang diarsipkan
+        self.assertEqual(len(archived_outlet.message_ids), initial_msg_count, "Chatter outlet tidak boleh mencatat kunjungan saat non-aktif")
+
+        # 3. Aktifkan kembali outlet dan pastikan check-in berhasil
+        archived_outlet.write({'active': True})
+        res_active = self.url_open('/api/v1/sfa/sync-visit', data=json.dumps(payload), headers=headers)
+        self.assertEqual(res_active.status_code, 200, "Check-in harus berhasil (HTTP 200) setelah outlet aktif kembali")
+        self.assertEqual(len(archived_outlet.message_ids), initial_msg_count + 1, "Chatter outlet harus bertambah 1 pesan kunjungan saat aktif")
+
+
 

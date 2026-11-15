@@ -12,6 +12,7 @@ try:
 except ImportError:
     from odoo.tools import Markup, html_escape as escape
 
+import psycopg2
 from odoo import http, fields
 from odoo.http import request, Response
 from odoo.exceptions import AccessDenied, AccessError, UserError, ValidationError
@@ -573,11 +574,10 @@ class SfaApiController(http.Controller):
                 status=403
             )
 
-        # Idempotency Check: Cegah duplikasi tagihan
+        # Idempotency Check: Cegah duplikasi tagihan (evaluasi global konsisten dengan SQL constraint)
         if idempotency_key:
-            existing_move = user_env['account.move'].search([
+            existing_move = request.env['account.move'].sudo().search([
                 ('sfa_idempotency_key', '=', idempotency_key),
-                ('company_id', '=', partner.company_id.id or user_env.company.id)
             ], limit=1)
             if existing_move:
                 _logger.info("Idempotent replay detected for key '%s'. Returning existing invoice %s",
@@ -660,6 +660,35 @@ class SfaApiController(http.Controller):
                 json.dumps({"status": "error", "message": str(ue)}),
                 content_type="application/json;charset=utf-8",
                 status=400
+            )
+        except psycopg2.IntegrityError as ie:
+            user_env.cr.rollback()
+            # Race condition handling: tangani request paralel dengan Idempotency-Key yang sama persis
+            if idempotency_key:
+                existing_move = request.env['account.move'].sudo().search([
+                    ('sfa_idempotency_key', '=', idempotency_key),
+                ], limit=1)
+                if existing_move:
+                    _logger.info("Concurrent race-condition resolved for idempotency key '%s'. Returning existing invoice %s",
+                                 idempotency_key, existing_move.name)
+                    return Response(
+                        json.dumps({
+                            "status": "success",
+                            "invoice_id": existing_move.id,
+                            "invoice_name": existing_move.name,
+                            "amount_total": existing_move.amount_total,
+                            "state": existing_move.state,
+                            "created_by": existing_move.create_uid.name or user.name,
+                            "idempotent_replay": True
+                        }),
+                        content_type="application/json;charset=utf-8",
+                        status=200
+                    )
+            _logger.warning("Database integrity constraint violated during invoice creation: %s", str(ie))
+            return Response(
+                json.dumps({"status": "error", "message": "Database integrity constraint violated"}),
+                content_type="application/json;charset=utf-8",
+                status=409
             )
         except Exception as e:
             user_env.cr.rollback()

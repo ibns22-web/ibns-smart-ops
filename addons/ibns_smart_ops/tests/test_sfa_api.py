@@ -815,3 +815,61 @@ class TestSfaApi(HttpCase):
         finally:
             # Bersihkan cache rate limiter agar tidak mempengaruhi pengujian lain
             _rate_limit_records.clear()
+
+    def test_21_invoice_idempotency_concurrent_race_condition(self):
+        """Memverifikasi penanganan race condition saat dua request konkurensi tiba bersamaan:
+        Jika query search() awal belum melihat record karena belum commit, lalu create()
+        menabrak unique constraint (IntegrityError), kontroler menangkap eksepsi,
+        melakukan rollback, mengambil record yang tersimpan, dan mengembalikan HTTP 200 replay."""
+        from unittest.mock import patch
+
+        race_key = f"race_key_{uuid.uuid4().hex}"
+        # 1. Buat invoice awal yang sudah ada di database
+        first_invoice = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'partner_id': self.test_outlet.id,
+            'journal_id': self.sale_journal.id,
+            'sfa_idempotency_key': race_key,
+            'invoice_line_ids': [
+                (0, 0, {
+                    'name': 'Invoice Pertama Berhasil Terbit',
+                    'quantity': 1.0,
+                    'price_unit': 250000.0,
+                })
+            ]
+        })
+        first_invoice.action_post()
+
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': race_key,
+        }
+        payload = {
+            'partner_id': self.test_outlet.id,
+            'amount': 250000.0,
+            'description': 'Simulasi Race Condition Invoice'
+        }
+
+        # 2. Simulasikan search() awal mengembalikan kosong (seperti kondisi transaksi belum commit saat dibaca)
+        call_count = [0]
+        orig_search = type(self.env['account.move']).search
+
+        def mock_search(self_model, domain, *args, **kwargs):
+            if any(isinstance(cond, (list, tuple)) and cond[0] == 'sfa_idempotency_key' for cond in domain):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # Panggilan pertama (search pra-create): simulasikan belum melihat record
+                    return self_model.browse()
+            return orig_search(self_model, domain, *args, **kwargs)
+
+        with patch.object(type(self.env['account.move']), 'search', side_effect=mock_search, autospec=True):
+            with mute_logger('odoo.sql_db'):
+                response = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload), headers=headers)
+
+        self.assertEqual(response.status_code, 200, "Request harus berhasil dengan HTTP 200 (Replay), bukan HTTP 500")
+        res_data = response.json()
+        self.assertEqual(res_data.get('status'), 'success')
+        self.assertEqual(res_data.get('invoice_id'), first_invoice.id)
+        self.assertTrue(res_data.get('idempotent_replay'))
+

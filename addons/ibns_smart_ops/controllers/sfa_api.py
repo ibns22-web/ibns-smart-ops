@@ -442,42 +442,60 @@ class SfaApiController(http.Controller):
         geofence_info = None
         geofence_badge = ""
 
-        if (
-            raw_lat is not None and not isinstance(raw_lat, bool) and
-            raw_lon is not None and not isinstance(raw_lon, bool)
-        ):
+        # Jika salah satu koordinat dikirimkan, keduanya wajib ada dan berupa angka finite yang valid
+        if raw_lat is not None or raw_lon is not None:
+            if raw_lat is None or raw_lon is None:
+                return Response(
+                    json.dumps({"status": "error", "message": "Both checkin_latitude and checkin_longitude are required when submitting coordinates"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+            if isinstance(raw_lat, bool) or isinstance(raw_lon, bool):
+                return Response(
+                    json.dumps({"status": "error", "message": "Invalid checkin coordinates format: boolean values not allowed"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
             try:
                 checkin_lat = float(raw_lat)
                 checkin_lon = float(raw_lon)
-                if math.isfinite(checkin_lat) and math.isfinite(checkin_lon):
-                    has_partner_coords = (
-                        partner.partner_latitude is not False and partner.partner_latitude is not None and
-                        partner.partner_longitude is not False and partner.partner_longitude is not None
-                    )
-                    if has_partner_coords and (partner.partner_latitude != 0.0 or partner.partner_longitude != 0.0):
-                        dist_m = _calculate_haversine_distance(
-                            checkin_lat, checkin_lon,
-                            partner.partner_latitude, partner.partner_longitude
-                        )
-                        max_radius = partner.geofence_radius_meters or 200.0
-                        is_inside = (dist_m <= max_radius)
-                        geofence_info = {
-                            "verified": is_inside,
-                            "distance_meters": dist_m,
-                            "allowed_radius_meters": max_radius,
-                            "checkin_coordinates": [checkin_lat, checkin_lon]
-                        }
-                        if is_inside:
-                            geofence_badge = f"<br/><span style='color: #28a745; font-weight: bold;'>&#10004; Geofence Verified ({dist_m}m dari outlet)</span>"
-                        else:
-                            geofence_badge = f"<br/><span style='color: #dc3545; font-weight: bold;'>&#9888; Geofence Mismatch: {dist_m}m dari outlet (Radius maks: {max_radius}m)</span>"
-                    else:
-                        geofence_info = {
-                            "verified": False,
-                            "reason": "Outlet does not have registered GPS coordinates"
-                        }
+                if not (math.isfinite(checkin_lat) and math.isfinite(checkin_lon)):
+                    raise ValueError("Non-finite coordinates")
+                if not (-90.0 <= checkin_lat <= 90.0 and -180.0 <= checkin_lon <= 180.0):
+                    raise ValueError("Coordinates out of WGS84 range")
             except (ValueError, TypeError):
-                geofence_info = None
+                return Response(
+                    json.dumps({"status": "error", "message": "Invalid checkin coordinates format: must be valid finite numbers (lat: -90..90, lon: -180..180)"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+
+            has_partner_coords = (
+                partner.partner_latitude is not False and partner.partner_latitude is not None and
+                partner.partner_longitude is not False and partner.partner_longitude is not None
+            )
+            if has_partner_coords and (partner.partner_latitude != 0.0 or partner.partner_longitude != 0.0):
+                dist_m = _calculate_haversine_distance(
+                    checkin_lat, checkin_lon,
+                    partner.partner_latitude, partner.partner_longitude
+                )
+                max_radius = partner.geofence_radius_meters or 200.0
+                is_inside = (dist_m <= max_radius)
+                geofence_info = {
+                    "verified": is_inside,
+                    "distance_meters": dist_m,
+                    "allowed_radius_meters": max_radius,
+                    "checkin_coordinates": [checkin_lat, checkin_lon]
+                }
+                if is_inside:
+                    geofence_badge = f"<br/><span style='color: #28a745; font-weight: bold;'>&#10004; Geofence Verified ({dist_m}m dari outlet)</span>"
+                else:
+                    geofence_badge = f"<br/><span style='color: #dc3545; font-weight: bold;'>&#9888; Geofence Mismatch: {dist_m}m dari outlet (Radius maks: {max_radius}m)</span>"
+            else:
+                geofence_info = {
+                    "verified": False,
+                    "reason": "Outlet does not have registered GPS coordinates"
+                }
 
         notes = payload.get('notes', '')
         clean_notes = escape(str(notes)) if notes else ""

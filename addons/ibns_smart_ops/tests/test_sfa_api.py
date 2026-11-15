@@ -1066,3 +1066,52 @@ class TestSfaApi(HttpCase):
             if income_acc and orig_taxes is not False:
                 income_acc.write({'tax_ids': [(6, 0, orig_taxes)]})
 
+    def test_25_invalid_checkin_coordinates_rejection(self):
+        """Memverifikasi bahwa koordinat check-in kunjungan lapangan yang tidak valid ditolak dengan HTTP 400
+        alih-alih diabaikan secara diam-diam (silent bypass).
+        Menguji string non-angka ('abc'), nilai non-finite ('NaN', 'inf'), boolean, di luar rentang WGS84,
+        serta koordinat yang hanya dikirim sebagian (latitude tanpa longitude)."""
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+
+        # 1. Koordinat string non-angka ('abc')
+        res_abc = self.url_open('/api/v1/sfa/sync-visit',
+                                data=json.dumps({'outlet_id': self.test_outlet.id, 'checkin_latitude': 'abc', 'checkin_longitude': 107.6}),
+                                headers=headers)
+        self.assertEqual(res_abc.status_code, 400, "Latitude 'abc' harus ditolak dengan HTTP 400")
+        self.assertIn('coordinates format', res_abc.json().get('message', '').lower())
+
+        # 2. Koordinat 'NaN' dan 'Infinity'
+        for bad_coord in ['NaN', 'nan', 'inf', '-inf', 'Infinity', '-Infinity']:
+            res_bad = self.url_open('/api/v1/sfa/sync-visit',
+                                    data=json.dumps({'outlet_id': self.test_outlet.id, 'checkin_latitude': bad_coord, 'checkin_longitude': 107.6}),
+                                    headers=headers)
+            self.assertEqual(res_bad.status_code, 400, f"Latitude '{bad_coord}' harus ditolak dengan HTTP 400")
+
+        # 3. Koordinat boolean (True/False)
+        res_bool = self.url_open('/api/v1/sfa/sync-visit',
+                                 data=json.dumps({'outlet_id': self.test_outlet.id, 'checkin_latitude': True, 'checkin_longitude': 107.6}),
+                                 headers=headers)
+        self.assertEqual(res_bool.status_code, 400, "Latitude boolean harus ditolak dengan HTTP 400")
+
+        # 4. Koordinat di luar batas WGS84 (Lat > 90 atau Lon > 180)
+        res_out_of_bounds = self.url_open('/api/v1/sfa/sync-visit',
+                                          data=json.dumps({'outlet_id': self.test_outlet.id, 'checkin_latitude': 95.0, 'checkin_longitude': 107.6}),
+                                          headers=headers)
+        self.assertEqual(res_out_of_bounds.status_code, 400, "Latitude di luar rentang [-90, 90] harus ditolak dengan HTTP 400")
+
+        # 5. Koordinat parsial (hanya latitude tanpa longitude)
+        res_partial = self.url_open('/api/v1/sfa/sync-visit',
+                                    data=json.dumps({'outlet_id': self.test_outlet.id, 'checkin_latitude': -6.917}),
+                                    headers=headers)
+        self.assertEqual(res_partial.status_code, 400, "Koordinat parsial harus ditolak dengan HTTP 400")
+        self.assertIn('both checkin_latitude and checkin_longitude', res_partial.json().get('message', '').lower())
+
+        # 6. Tanpa koordinat sama sekali (device tanpa GPS) tetap diizinkan (HTTP 200)
+        res_no_coords = self.url_open('/api/v1/sfa/sync-visit',
+                                      data=json.dumps({'outlet_id': self.test_outlet.id, 'notes': 'Kunjungan tanpa GPS'}),
+                                      headers=headers)
+        self.assertEqual(res_no_coords.status_code, 200, "Check-in tanpa koordinat GPS tetap diizinkan (HTTP 200)")
+

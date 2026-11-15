@@ -463,12 +463,45 @@ class TestSfaApi(HttpCase):
             'delivery_status': 'scheduled',
         })
 
-        # 3. Query dengan konteks sfa_driver: Hanya picking_a yang boleh terlihat
+        test_prod = self.env['product.product'].search([], limit=1)
+        if not test_prod:
+            test_prod = self.env['product.product'].create({'name': 'Barang Uji Kirim'})
+
+        move_a = self.env['stock.move'].create({
+            'name': 'Barang Kirim Driver A',
+            'product_id': test_prod.id,
+            'product_uom_qty': 10.0,
+            'picking_id': picking_a.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': self.test_outlet.property_stock_customer.id,
+        })
+        move_b = self.env['stock.move'].create({
+            'name': 'Barang Kirim Driver B',
+            'product_id': test_prod.id,
+            'product_uom_qty': 20.0,
+            'picking_id': picking_b.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': self.test_outlet.property_stock_customer.id,
+        })
+
+        # 3. Query dengan konteks sfa_driver: Hanya picking_a dan move_a yang boleh terlihat
         driver_visible_pickings = self.env['stock.picking'].with_user(self.sfa_driver).search([
             ('id', 'in', [picking_a.id, picking_b.id])
         ])
         self.assertIn(picking_a, driver_visible_pickings, "Driver harus melihat order tugasnya sendiri")
         self.assertNotIn(picking_b, driver_visible_pickings, "Record rule harus menyembunyikan tugas driver lain")
+
+        # Driver membaca picking form/fields dan relasi move_ids tanpa AccessError
+        p_read = picking_a.with_user(self.sfa_driver).read(['name', 'partner_id', 'move_ids'])
+        self.assertTrue(p_read)
+        self.assertEqual(picking_a.with_user(self.sfa_driver).move_ids.ids, [move_a.id])
+
+        # Verifikasi isolasi stock.move: Driver A hanya dapat melihat move_a, bukan move_b
+        driver_visible_moves = self.env['stock.move'].with_user(self.sfa_driver).search([
+            ('id', 'in', [move_a.id, move_b.id])
+        ])
+        self.assertIn(move_a, driver_visible_moves, "Driver harus bisa melihat baris barang tugasnya")
+        self.assertNotIn(move_b, driver_visible_moves, "Driver tidak boleh melihat baris barang driver lain")
 
         # 4. Query dengan konteks Manager: Kedua picking harus terlihat
         manager_visible_pickings = self.env['stock.picking'].with_user(self.sfa_manager).search([

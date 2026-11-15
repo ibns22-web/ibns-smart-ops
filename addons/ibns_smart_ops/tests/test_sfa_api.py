@@ -966,3 +966,43 @@ class TestSfaApi(HttpCase):
         self.assertEqual(created_invoice.journal_id.id, journal_b.id, "Faktur harus menggunakan jurnal Perusahaan B")
         self.assertEqual(created_invoice.state, 'posted', "Faktur harus sukses terposting (posted)")
 
+    def test_23_boolean_type_coercion_rejection(self):
+        """Memverifikasi bahwa payload dengan tipe data boolean (true/false) ditolak dengan HTTP 400
+        pada field yang memerlukan tipe integer atau float (outlet_id, partner_id, amount).
+        Mencegah kerentanan Python bool inheritance (int(True) == 1, float(True) == 1.0)."""
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+
+        # 1. POST /api/v1/sfa/sync-visit dengan outlet_id = True / False
+        res_visit_bool_true = self.url_open('/api/v1/sfa/sync-visit',
+                                            data=json.dumps({'outlet_id': True, 'notes': 'Test'}),
+                                            headers=headers)
+        self.assertEqual(res_visit_bool_true.status_code, 400, "outlet_id boolean true harus ditolak dengan HTTP 400")
+        self.assertIn('outlet_id format', res_visit_bool_true.json().get('message', '').lower())
+
+        res_visit_bool_false = self.url_open('/api/v1/sfa/sync-visit',
+                                             data=json.dumps({'outlet_id': False, 'notes': 'Test'}),
+                                             headers=headers)
+        self.assertEqual(res_visit_bool_false.status_code, 400, "outlet_id boolean false harus ditolak dengan HTTP 400")
+
+        # 2. POST /api/v1/sfa/invoices dengan partner_id = True / False
+        res_inv_partner_bool = self.url_open('/api/v1/sfa/invoices',
+                                             data=json.dumps({'partner_id': True, 'amount': 100000.0}),
+                                             headers=headers)
+        self.assertEqual(res_inv_partner_bool.status_code, 400, "partner_id boolean true harus ditolak dengan HTTP 400")
+        self.assertIn('partner_id format', res_inv_partner_bool.json().get('message', '').lower())
+
+        # 3. POST /api/v1/sfa/invoices dengan amount = True / False
+        res_inv_amount_bool_true = self.url_open('/api/v1/sfa/invoices',
+                                                 data=json.dumps({'partner_id': self.test_outlet.id, 'amount': True}),
+                                                 headers=headers)
+        self.assertEqual(res_inv_amount_bool_true.status_code, 400, "amount boolean true harus ditolak dengan HTTP 400")
+        self.assertIn('greater than zero', res_inv_amount_bool_true.json().get('message', '').lower())
+
+        res_inv_amount_bool_false = self.url_open('/api/v1/sfa/invoices',
+                                                  data=json.dumps({'partner_id': self.test_outlet.id, 'amount': False}),
+                                                  headers=headers)
+        self.assertEqual(res_inv_amount_bool_false.status_code, 400, "amount boolean false harus ditolak dengan HTTP 400")
+

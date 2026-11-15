@@ -400,6 +400,13 @@ class SfaApiController(http.Controller):
                 status=400
             )
 
+        if isinstance(outlet_id, bool):
+            return Response(
+                json.dumps({"status": "error", "message": "Invalid outlet_id format"}),
+                content_type="application/json;charset=utf-8",
+                status=400
+            )
+
         user_env = self._get_user_env(user)
 
         try:
@@ -547,10 +554,24 @@ class SfaApiController(http.Controller):
                 status=400
             )
 
+        if isinstance(partner_id, bool):
+            return Response(
+                json.dumps({"status": "error", "message": "Invalid partner_id format"}),
+                content_type="application/json;charset=utf-8",
+                status=400
+            )
+
         raw_amount = payload.get('amount')
         if raw_amount is None:
             return Response(
                 json.dumps({"status": "error", "message": "amount is required"}),
+                content_type="application/json;charset=utf-8",
+                status=400
+            )
+
+        if isinstance(raw_amount, bool):
+            return Response(
+                json.dumps({"status": "error", "message": "amount must be a finite number greater than zero"}),
                 content_type="application/json;charset=utf-8",
                 status=400
             )

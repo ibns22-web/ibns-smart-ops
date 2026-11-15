@@ -78,8 +78,17 @@ class StockPicking(models.Model):
     @api.model
     def _register_hook(self):
         """Menjamin domain_force pada rule_stock_picking_sfa_user dan rule_stock_move_sfa_user
-        secara ketat mengunci kunci asing relational driver_id = user.id dan kebal dari spoofing nama profil."""
+        secara ketat mengunci kunci asing relational driver_id = user.id dan kebal dari spoofing nama profil,
+        serta mereset bendera noupdate pada ir.rule agar pembaruan modul (-u) selalu menerapkan aturan terbaru."""
         super()._register_hook()
+        rules_data = self.env['ir.model.data'].search([
+            ('module', '=', 'ibns_smart_ops'),
+            ('model', '=', 'ir.rule'),
+            ('noupdate', '=', True)
+        ])
+        if rules_data:
+            rules_data.sudo().write({'noupdate': False})
+
         rule_picking = self.env.ref('ibns_smart_ops.rule_stock_picking_sfa_user', raise_if_not_found=False)
         if rule_picking and rule_picking.domain_force != "[('driver_id', '=', user.id)]":
             rule_picking.sudo().write({'domain_force': "[('driver_id', '=', user.id)]"})

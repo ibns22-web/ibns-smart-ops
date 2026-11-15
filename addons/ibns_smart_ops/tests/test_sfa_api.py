@@ -1427,6 +1427,27 @@ class TestSfaApi(HttpCase):
         finally:
             self.sfa_driver.write({'name': original_name_a})
 
+    def test_31_security_rules_noupdate_flag_verification(self):
+        """Memverifikasi bahwa seluruh aturan keamanan ir.rule milik modul ibns_smart_ops
+        berada dalam status noupdate=False di ir.model.data sehingga dapat selalu diperbarui
+        saat upgrade modul (-u ibns_smart_ops), sedangkan akun integrasi sistem tetap noupdate=True."""
+        rules_data = self.env['ir.model.data'].search([
+            ('module', '=', 'ibns_smart_ops'),
+            ('model', '=', 'ir.rule')
+        ])
+        self.assertTrue(len(rules_data) >= 6, "Seluruh ir.rule harus terdaftar dalam ir.model.data")
+        for r in rules_data:
+            self.assertFalse(r.noupdate, f"Rule {r.name} tidak boleh terkunci dengan noupdate=True")
+
+        # Akun integrasi service tetap terlindungi dengan noupdate=True
+        user_data = self.env['ir.model.data'].search([
+            ('module', '=', 'ibns_smart_ops'),
+            ('name', 'in', ['partner_sfa_api_service', 'user_sfa_api_service'])
+        ])
+        for u in user_data:
+            self.assertTrue(u.noupdate, f"Akun bawaan {u.name} harus memiliki noupdate=True")
+
+
 
 
 

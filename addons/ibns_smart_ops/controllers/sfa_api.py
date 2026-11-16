@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from collections import defaultdict
 
@@ -25,6 +26,7 @@ _logger = logging.getLogger(__name__)
 RATE_LIMIT_WINDOW = 60  # Jendela waktu dalam detik
 RATE_LIMIT_MAX_REQUESTS = 60  # Maksimum request per jendela waktu
 _rate_limit_records = defaultdict(list)
+_rate_limit_lock = threading.Lock()
 
 
 def _calculate_haversine_distance(lat1, lon1, lat2, lon2):
@@ -48,46 +50,48 @@ class SfaApiController(http.Controller):
         """Memeriksa ambang batas frekuensi request (Rate Guard).
         Membersihkan timestamp yang sudah kedaluwarsa (> 60 detik) untuk mencegah memory leak.
         Mengembalikan Response HTTP 429 jika melebihi batas (60 req/menit), atau None jika diizinkan.
+        Dilindungi _rate_limit_lock agar aman digunakan pada konkurensi multi-thread.
         """
         now = time.time()
         window_start = now - RATE_LIMIT_WINDOW
 
-        # Bersihkan timestamp kedaluwarsa (> 60 detik) dari seluruh record agar tidak terjadi memory leak
-        stale_identifiers = []
-        for ident, record_times in list(_rate_limit_records.items()):
-            valid_times = [t for t in record_times if t > window_start]
-            if valid_times:
-                _rate_limit_records[ident] = valid_times
-            else:
-                stale_identifiers.append(ident)
-        for ident in stale_identifiers:
-            _rate_limit_records.pop(ident, None)
-
         # Identifikasi klien berdasarkan IP
         client_ip = request.httprequest.remote_addr or 'unknown_ip'
 
-        valid_timestamps = _rate_limit_records[client_ip]
+        with _rate_limit_lock:
+            # Bersihkan timestamp kedaluwarsa (> 60 detik) dari seluruh record agar tidak terjadi memory leak
+            stale_identifiers = []
+            for ident, record_times in list(_rate_limit_records.items()):
+                valid_times = [t for t in record_times if t > window_start]
+                if valid_times:
+                    _rate_limit_records[ident] = valid_times
+                else:
+                    stale_identifiers.append(ident)
+            for ident in stale_identifiers:
+                _rate_limit_records.pop(ident, None)
 
-        if len(valid_timestamps) >= RATE_LIMIT_MAX_REQUESTS:
-            oldest = valid_timestamps[0]
-            retry_after = max(1, int(RATE_LIMIT_WINDOW - (now - oldest)) + 1)
-            _logger.warning("Rate limit exceeded for IP %s (%d requests in 60s)", client_ip, len(valid_timestamps))
-            return Response(
-                json.dumps({
-                    "status": "error",
-                    "message": f"Too Many Requests: Rate limit of {RATE_LIMIT_MAX_REQUESTS} req/min exceeded. Retry after {retry_after}s."
-                }),
-                content_type="application/json;charset=utf-8",
-                status=429,
-                headers={
-                    "Retry-After": str(retry_after),
-                    "X-RateLimit-Limit": str(RATE_LIMIT_MAX_REQUESTS),
-                    "X-RateLimit-Remaining": "0"
-                }
-            )
+            valid_timestamps = _rate_limit_records[client_ip]
 
-        _rate_limit_records[client_ip].append(now)
-        return None
+            if len(valid_timestamps) >= RATE_LIMIT_MAX_REQUESTS:
+                oldest = valid_timestamps[0]
+                retry_after = max(1, int(RATE_LIMIT_WINDOW - (now - oldest)) + 1)
+                _logger.warning("Rate limit exceeded for IP %s (%d requests in 60s)", client_ip, len(valid_timestamps))
+                return Response(
+                    json.dumps({
+                        "status": "error",
+                        "message": f"Too Many Requests: Rate limit of {RATE_LIMIT_MAX_REQUESTS} req/min exceeded. Retry after {retry_after}s."
+                    }),
+                    content_type="application/json;charset=utf-8",
+                    status=429,
+                    headers={
+                        "Retry-After": str(retry_after),
+                        "X-RateLimit-Limit": str(RATE_LIMIT_MAX_REQUESTS),
+                        "X-RateLimit-Remaining": "0"
+                    }
+                )
+
+            _rate_limit_records[client_ip].append(now)
+            return None
 
     def _sanitize_record(self, data):
         """Mengubah representasi nilai False internal Odoo dan koordinat kosong menjadi None (null di JSON).
@@ -579,39 +583,81 @@ class SfaApiController(http.Controller):
                 status=400
             )
 
-        raw_amount = payload.get('amount')
-        if raw_amount is None:
-            return Response(
-                json.dumps({"status": "error", "message": "amount is required"}),
-                content_type="application/json;charset=utf-8",
-                status=400
-            )
+        sale_order_id = payload.get('sale_order_id')
+        if sale_order_id is not None:
+            if isinstance(sale_order_id, bool):
+                return Response(
+                    json.dumps({"status": "error", "message": "Invalid sale_order_id format"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+            try:
+                sale_order_id = int(sale_order_id)
+            except (ValueError, TypeError):
+                return Response(
+                    json.dumps({"status": "error", "message": "Invalid sale_order_id format"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
 
-        if isinstance(raw_amount, bool):
-            return Response(
-                json.dumps({"status": "error", "message": "amount must be a finite number greater than zero"}),
-                content_type="application/json;charset=utf-8",
-                status=400
-            )
+        if sale_order_id is None:
+            raw_amount = payload.get('amount')
+            if raw_amount is None:
+                return Response(
+                    json.dumps({"status": "error", "message": "amount is required"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
 
-        # Validasi ketat finite number: Tolak NaN, Infinity, -Infinity, dan <= 0
-        try:
-            amount = float(raw_amount)
-            if not math.isfinite(amount) or amount <= 0:
-                _logger.warning("Rejected non-finite or non-positive invoice amount: %s", raw_amount)
+            if isinstance(raw_amount, bool):
                 return Response(
                     json.dumps({"status": "error", "message": "amount must be a finite number greater than zero"}),
                     content_type="application/json;charset=utf-8",
                     status=400
                 )
-        except (ValueError, TypeError):
-            return Response(
-                json.dumps({"status": "error", "message": "Invalid amount format"}),
-                content_type="application/json;charset=utf-8",
-                status=400
-            )
 
-        description = payload.get('description') or "SFA Field Invoice"
+            # Validasi ketat finite number: Tolak NaN, Infinity, -Infinity, dan <= 0
+            try:
+                amount = float(raw_amount)
+                if not math.isfinite(amount) or amount <= 0:
+                    _logger.warning("Rejected non-finite or non-positive invoice amount: %s", raw_amount)
+                    return Response(
+                        json.dumps({"status": "error", "message": "amount must be a finite number greater than zero"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+            except (ValueError, TypeError):
+                return Response(
+                    json.dumps({"status": "error", "message": "Invalid amount format"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+
+            description = payload.get('description') or "SFA Field Invoice"
+        else:
+            raw_amount = payload.get('amount')
+            if raw_amount is not None:
+                if isinstance(raw_amount, bool):
+                    return Response(
+                        json.dumps({"status": "error", "message": "amount must be a finite number greater than zero"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+                try:
+                    amount = float(raw_amount)
+                    if not math.isfinite(amount) or amount <= 0:
+                        return Response(
+                            json.dumps({"status": "error", "message": "amount must be a finite number greater than zero"}),
+                            content_type="application/json;charset=utf-8",
+                            status=400
+                        )
+                except (ValueError, TypeError):
+                    return Response(
+                        json.dumps({"status": "error", "message": "Invalid amount format"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+            description = payload.get('description') or "SFA Field Invoice"
 
         # Ekstraksi Idempotency Key
         idempotency_key = (
@@ -651,6 +697,30 @@ class SfaApiController(http.Controller):
         user_env = self._get_user_env(user, target_company=target_company)
         partner = partner.with_env(user_env)
 
+        sale_order = None
+        if sale_order_id is not None:
+            try:
+                sale_order = user_env['sale.order'].browse(sale_order_id)
+                if not sale_order.exists():
+                    return Response(
+                        json.dumps({"status": "error", "message": "Sale order not found"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+                if sale_order.partner_id.id != partner.id:
+                    return Response(
+                        json.dumps({"status": "error", "message": "Sale order does not belong to the specified partner"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+            except AccessError as ae:
+                _logger.warning("AccessError browsing sale.order %s by user %s: %s", sale_order_id, user.login, str(ae))
+                return Response(
+                    json.dumps({"status": "error", "message": f"Forbidden: Insufficient permissions to access sale order ({str(ae)})"}),
+                    content_type="application/json;charset=utf-8",
+                    status=403
+                )
+
         # Idempotency Check: Cegah duplikasi tagihan dalam cakupan hak akses user & allowed companies
         if idempotency_key:
             try:
@@ -682,43 +752,56 @@ class SfaApiController(http.Controller):
                 )
 
         try:
-            journal = user_env['account.journal'].search([
-                ('type', '=', 'sale'),
-                ('company_id', '=', target_company.id)
-            ], limit=1)
-            if not journal:
-                journal = user_env['account.journal'].search([('type', '=', 'sale')], limit=1)
-            if not journal:
-                return Response(
-                    json.dumps({"status": "error", "message": "Default sale journal not found"}),
-                    content_type="application/json;charset=utf-8",
-                    status=400
-                )
+            if sale_order:
+                invoices = sale_order._create_invoices()
+                if not invoices:
+                    return Response(
+                        json.dumps({"status": "error", "message": "No invoiceable lines found for this sale order"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+                move = invoices[0]
+                if idempotency_key:
+                    move.sfa_idempotency_key = idempotency_key
+                move.action_post()
+            else:
+                journal = user_env['account.journal'].search([
+                    ('type', '=', 'sale'),
+                    ('company_id', '=', target_company.id)
+                ], limit=1)
+                if not journal:
+                    journal = user_env['account.journal'].search([('type', '=', 'sale')], limit=1)
+                if not journal:
+                    return Response(
+                        json.dumps({"status": "error", "message": "Default sale journal not found"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
 
-            # Gunakan default_account_id dari jurnal penjualan yang dipilih (mencegah AccessError pada
-            # account.account dan mencegah pemilihan akun pendapatan acak seperti income_other/selisih kurs)
-            inv_line_vals = {
-                'name': description,
-                'quantity': 1.0,
-                'price_unit': amount,
-                'tax_ids': [(5, 0, 0)],
-            }
-            if journal.default_account_id:
-                inv_line_vals['account_id'] = journal.default_account_id.id
+                # Gunakan default_account_id dari jurnal penjualan yang dipilih (mencegah AccessError pada
+                # account.account dan mencegah pemilihan akun pendapatan acak seperti income_other/selisih kurs)
+                inv_line_vals = {
+                    'name': description,
+                    'quantity': 1.0,
+                    'price_unit': amount,
+                    'tax_ids': [(5, 0, 0)],
+                }
+                if journal.default_account_id:
+                    inv_line_vals['account_id'] = journal.default_account_id.id
 
-            move_vals = {
-                'move_type': 'out_invoice',
-                'partner_id': partner.id,
-                'company_id': target_company.id,
-                'journal_id': journal.id,
-                'invoice_date': fields.Date.context_today(partner),
-                'invoice_line_ids': [(0, 0, inv_line_vals)],
-            }
-            if idempotency_key:
-                move_vals['sfa_idempotency_key'] = idempotency_key
+                move_vals = {
+                    'move_type': 'out_invoice',
+                    'partner_id': partner.id,
+                    'company_id': target_company.id,
+                    'journal_id': journal.id,
+                    'invoice_date': fields.Date.context_today(partner),
+                    'invoice_line_ids': [(0, 0, inv_line_vals)],
+                }
+                if idempotency_key:
+                    move_vals['sfa_idempotency_key'] = idempotency_key
 
-            move = user_env['account.move'].create(move_vals)
-            move.action_post()
+                move = user_env['account.move'].create(move_vals)
+                move.action_post()
 
             _logger.info("Invoice %s created and posted successfully by user %s (Amount: %s)",
                          move.name, user.login, move.amount_total)

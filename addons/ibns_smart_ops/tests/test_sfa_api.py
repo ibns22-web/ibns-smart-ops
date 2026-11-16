@@ -1447,6 +1447,138 @@ class TestSfaApi(HttpCase):
         for u in user_data:
             self.assertTrue(u.noupdate, f"Akun bawaan {u.name} harus memiliki noupdate=True")
 
+    def test_32_create_invoice_via_sale_order_and_fully_reconciled(self):
+        """Memverifikasi pembuatan faktur penjualan via endpoint /api/v1/sfa/invoices menggunakan sale_order_id:
+        1. Validasi penolakan sale_order_id bertipe boolean, non-angka, tidak ditemukan, dan milik partner lain (HTTP 400).
+        2. Pembuatan faktur otomatis via sale_order._create_invoices() terikat pada sale.order terkait.
+        3. Penyimpanan sfa_idempotency_key dan auto-post faktur (state='posted').
+        4. Replay idempotency dengan key yang sama mengembalikan HTTP 200.
+        5. Perubahan komputasi delivered_vs_invoiced_status pada stock.picking menjadi 'fully_reconciled'."""
+        picking_type = self.env['stock.picking.type'].search([('code', '=', 'outgoing')], limit=1)
+        self.assertTrue(picking_type, "Outgoing picking type harus tersedia")
+
+        # 1. Setup produk dan Sales Order
+        test_product = self.env['product.product'].create({
+            'name': 'Produk SFA SO Invoicing Test',
+            'type': 'consu',
+            'list_price': 150000.0,
+            'taxes_id': False,
+        })
+        sale_order = self.env['sale.order'].create({
+            'partner_id': self.test_outlet.id,
+            'order_line': [(0, 0, {
+                'product_id': test_product.id,
+                'product_uom_qty': 5.0,
+                'price_unit': 150000.0,
+                'tax_id': False,
+            })]
+        })
+        sale_order.action_confirm()
+
+        # 2. Setup picking berstatus delivered (kuantitas terkirim = 5.0)
+        picking = self.env['stock.picking'].create({
+            'picking_type_id': picking_type.id,
+            'partner_id': self.test_outlet.id,
+            'location_id': picking_type.default_location_src_id.id,
+            'location_dest_id': self.test_outlet.property_stock_customer.id,
+            'sale_id': sale_order.id,
+            'delivery_status': 'delivered',
+            'state': 'done',
+        })
+        sale_order.order_line.write({'qty_delivered': 5.0})
+
+        # Sebelum faktur dibuat/posted, status harus 'delivered_pending_invoice'
+        self.assertEqual(
+            picking.delivered_vs_invoiced_status,
+            'delivered_pending_invoice',
+            "Picking terkirim tanpa faktur harus berstatus 'delivered_pending_invoice'"
+        )
+
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+
+        # 3. Validasi: sale_order_id boolean (True/False) ditolak dengan HTTP 400
+        res_bool = self.url_open('/api/v1/sfa/invoices',
+                                 data=json.dumps({'partner_id': self.test_outlet.id, 'sale_order_id': True}),
+                                 headers=headers)
+        self.assertEqual(res_bool.status_code, 400, "sale_order_id boolean harus ditolak dengan HTTP 400")
+
+        # 4. Validasi: sale_order_id format salah ditolak dengan HTTP 400
+        res_bad_fmt = self.url_open('/api/v1/sfa/invoices',
+                                    data=json.dumps({'partner_id': self.test_outlet.id, 'sale_order_id': 'so_satu'}),
+                                    headers=headers)
+        self.assertEqual(res_bad_fmt.status_code, 400, "sale_order_id non-angka harus ditolak dengan HTTP 400")
+
+        # 5. Validasi: sale_order_id tidak ditemukan ditolak dengan HTTP 400
+        res_not_found = self.url_open('/api/v1/sfa/invoices',
+                                      data=json.dumps({'partner_id': self.test_outlet.id, 'sale_order_id': 999999}),
+                                      headers=headers)
+        self.assertEqual(res_not_found.status_code, 400, "sale_order_id tidak ditemukan harus ditolak dengan HTTP 400")
+
+        # 6. Validasi: sale_order_id milik partner lain ditolak dengan HTTP 400
+        other_partner = self.env['res.partner'].create({
+            'name': 'Partner Lain Non-Apex',
+            'customer_rank': 1,
+        })
+        other_so = self.env['sale.order'].create({
+            'partner_id': other_partner.id,
+            'order_line': [(0, 0, {
+                'product_id': test_product.id,
+                'product_uom_qty': 2.0,
+                'price_unit': 100000.0,
+            })]
+        })
+        other_so.action_confirm()
+
+        res_wrong_partner = self.url_open('/api/v1/sfa/invoices',
+                                          data=json.dumps({'partner_id': self.test_outlet.id, 'sale_order_id': other_so.id}),
+                                          headers=headers)
+        self.assertEqual(res_wrong_partner.status_code, 400, "SO milik partner lain harus ditolak dengan HTTP 400")
+        self.assertIn('does not belong', res_wrong_partner.json().get('message', '').lower())
+
+        # 7. Pembuatan faktur sah via sale_order_id dengan Idempotency Key
+        idemp_token = f"so_idemp_key_{uuid.uuid4().hex}"
+        inv_headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': idemp_token,
+        }
+        inv_payload = {
+            'partner_id': self.test_outlet.id,
+            'sale_order_id': sale_order.id,
+        }
+        res_inv = self.url_open('/api/v1/sfa/invoices', data=json.dumps(inv_payload), headers=inv_headers)
+        self.assertEqual(res_inv.status_code, 201, "Pembuatan faktur via sale_order_id harus mengembalikan HTTP 201")
+
+        data_inv = res_inv.json()
+        self.assertEqual(data_inv.get('status'), 'success')
+        self.assertFalse(data_inv.get('idempotent_replay'))
+        invoice_id = data_inv.get('invoice_id')
+        self.assertTrue(invoice_id)
+
+        # 8. Verifikasi faktur di database
+        created_invoice = self.env['account.move'].browse(invoice_id)
+        self.assertTrue(created_invoice.exists())
+        self.assertEqual(created_invoice.state, 'posted', "Faktur dari SO harus berstatus posted")
+        self.assertEqual(created_invoice.sfa_idempotency_key, idemp_token, "Idempotency key harus tersimpan di faktur")
+        self.assertIn(created_invoice, sale_order.invoice_ids, "Faktur harus terhubung pada invoice_ids Sales Order")
+        self.assertEqual(created_invoice.amount_total, 750000.0, "Total faktur harus Rp 750.000 (5 x Rp 150.000)")
+
+        # 9. Verifikasi perubahan status delivered_vs_invoiced_status menjadi 'fully_reconciled'
+        self.assertEqual(
+            picking.delivered_vs_invoiced_status,
+            'fully_reconciled',
+            "Status audit Delivered vs Invoiced harus berubah menjadi 'fully_reconciled' setelah faktur terbit dan terposting"
+        )
+
+        # 10. Verifikasi Idempotent Replay pada faktur SO
+        res_replay = self.url_open('/api/v1/sfa/invoices', data=json.dumps(inv_payload), headers=inv_headers)
+        self.assertEqual(res_replay.status_code, 200, "Replay idempotency faktur SO harus mengembalikan HTTP 200")
+        self.assertTrue(res_replay.json().get('idempotent_replay'))
+        self.assertEqual(res_replay.json().get('invoice_id'), invoice_id)
+
 
 
 

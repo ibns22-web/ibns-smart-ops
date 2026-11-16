@@ -64,9 +64,9 @@ Semua endpoint didekorasi dengan `save_session=False`, memastikan Odoo tidak mem
 | ![Tampilan Peta Outlet & Validasi Geofencing SFA](docs/screenshots/01-odoo-sfa-location.png) | ![Verifikasi REST API JSON & Geofencing Response](docs/screenshots/02-api-json-verification.png) |
 | *Iframe OpenStreetMap tersemat dengan koordinat GPS, radius geofence, dan integrasi Google Maps* | *Verifikasi eksekusi REST API SFA, respon JSON geofence verified, dan atribusi pengguna* |
 
-### 2. Hasil Eksekusi Automated Test Suite (20 Tests Pass)
-![Hasil Eksekusi 20 Integration Tests Odoo 18](docs/screenshots/03-test-suite-20-passing.png)
-*Eksekusi seluruh 20 integration test suite (HttpCase) di lingkungan Odoo 18: 0 failed, 0 errors (100% lulus).*
+### 2. Hasil Eksekusi Automated Test Suite (31 Tests Pass)
+![Hasil Eksekusi 31 Integration Tests Odoo 18](docs/screenshots/03-test-suite-20-passing.png)
+*Eksekusi seluruh 31 integration test suite (HttpCase) di lingkungan Odoo 18: 0 failed, 0 errors (100% lulus).*
 
 ---
 
@@ -100,7 +100,7 @@ Semua endpoint didekorasi dengan `save_session=False`, memastikan Odoo tidak mem
 
 ### Hak Akses Grup Pengguna
 - **`ibns_smart_ops.group_sfa_user` (Driver / Sales Lapangan)**:
-  - Membaca daftar outlet dan melihat rute pengiriman yang ditugaskan ke namanya (`driver_name = user.name`).
+  - Membaca daftar outlet dan melihat rute pengiriman yang ditugaskan ke akunnya melalui isolasi berbasis relasi kunci asing `driver_id = user.id` (`Many2one('res.users')`).
   - Mengirimkan catatan check-in ke chatter partner.
   - **Dilarang keras menghapus data (`perm_unlink = 0`) dan dilarang membuat faktur**. Request ke endpoint faktur otomatis ditolak dengan **HTTP 403 Forbidden**.
 - **`ibns_smart_ops.group_sfa_manager` (Manajer Operasional & Logistik)**:
@@ -294,7 +294,7 @@ http://localhost:8069
 
 ## 🧪 Panduan Menjalankan Automated Test Suite
 
-Modul ini dilengkapi dengan **20 integration test suite** yang berjalan otomatis pada framework Odoo `HttpCase` ([test_sfa_api.py](addons/ibns_smart_ops/tests/test_sfa_api.py)).
+Modul ini dilengkapi dengan **31 integration test suite** yang berjalan otomatis pada framework Odoo `HttpCase` ([test_sfa_api.py](addons/ibns_smart_ops/tests/test_sfa_api.py)).
 
 ### 1. Perintah Menjalankan Seluruh Test
 Jalankan perintah berikut di terminal:
@@ -319,7 +319,7 @@ docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 --test-tags
 8. `test_08`: **Validasi Input Check-in**: Validasi `outlet_id` hilang, salah format, atau 404 pada `/api/v1/sfa/sync-visit`.
 9. `test_09`: **Haversine Geofencing & Chatter Markup**: Kalkulasi jarak GPS check-in (dalam geofence verified vs luar geofence alert) dan format HTML chatter.
 10. `test_10`: **Batas Akses Akun Driver (RBAC)**: Driver diizinkan membaca outlet dan check-in, tetapi diblokir dengan HTTP 403 Forbidden saat membuat faktur.
-11. `test_11`: **Isolasi Record Rules Driver**: Driver A hanya melihat delivery order miliknya, order Driver B terfilter otomatis; Manajer melihat seluruh order.
+11. `test_11`: **Isolasi Record Rules Driver & Sinkronisasi Kurir**: Memverifikasi isolasi Record Rule berbasis relasi kunci asing `driver_id = user.id` (`Many2one('res.users')`) di mana driver hanya dapat melihat pengiriman dan baris pergerakan barang (*stock moves*) miliknya sendiri, driver lain terfilter otomatis, manajer memiliki visibilitas global, serta otomatisasi sinkronisasi dan pengosongan `driver_name` saat pengalihan (*reassignment*) atau unassignment via ORM dan form UI onchange.
 12. `test_12`: **Idempotency Replay**: Memverifikasi `X-Idempotency-Key` mencegah duplikasi faktur saat network retry (HTTP 200 replay).
 13. `test_13`: **Sanitasi Field Kosong**: Memverifikasi nilai kosong Odoo diserialisasi sebagai `null` (bukan boolean `false`).
 14. `test_14`: **Audit Delivered vs Invoiced**: Memverifikasi secara eksplisit kelima status `delivered_vs_invoiced_status` pada `stock.picking` (`no_sale_order`, `not_delivered`, `invoiced_pending_delivery`, `delivered_pending_invoice`, dan `fully_reconciled`) serta memastikan operasi penerimaan barang masuk (`incoming`) dikecualikan (`False`).
@@ -328,15 +328,26 @@ docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 --test-tags
 17. `test_17`: **Idempotency SQL Constraint**: Memverifikasi proteksi balapan (*race condition*) faktur ganda di level database PostgreSQL melalui `UNIQUE (sfa_idempotency_key)`.
 18. `test_18`: **Pagination Endpoint Outlets**: Memverifikasi query parameter `limit` dan `offset` pada `GET /api/v1/sfa/outlets`.
 19. `test_19`: **Fleksibilitas Zona Outlet**: Memverifikasi record partner baru tidak memaksakan zona bawaan tertentu (*unassigned* fleksibel).
-20. `test_20`: **Rate Guard Throttling (HTTP 429)**: Memverifikasi penolakan request ke-61 dalam 60 detik per IP client.
+20. `test_20`: **Rate Guard Throttling (HTTP 429)**: Memverifikasi penolakan request ke-61 dalam 60 detik per IP client serta kelengkapan header `Retry-After`.
+21. `test_21`: **Konkurensi & Race Condition Idempotency**: Memverifikasi penanganan kondisi balapan (*race condition*) saat dua request konkuren tiba bersamaan; eksepsi `IntegrityError` ditangkap dengan aman untuk melakukan rollback dan mengembalikan respons HTTP 200 replay (bukan HTTP 500).
+22. `test_22`: **Multi-Company & Allowed Companies**: Memverifikasi penanganan multi-perusahaan pada pembacaan outlet, pencatatan kunjungan (*check-in*), serta pembuatan faktur dengan `company_id` dan jurnal Perusahaan B yang sesuai tanpa kendala *Incompatible companies*.
+23. `test_23`: **Penolakan Koersi Tipe Boolean**: Memverifikasi penolakan nilai boolean (`true`/`false`) pada field numerik (`outlet_id`, `partner_id`, `amount`) dengan HTTP 400 guna mencegah kerentanan koersi bawaan Python (`int(True) == 1`).
+24. `test_24`: **Eksklusi Pajak Otomatis (Tax Exclusion)**: Memverifikasi baris faktur yang dibuat via API mengeksklusikan pajak otomatis akun pendapatan (`tax_ids: [(5, 0, 0)]`), menjamin `amount_total` faktur persis sesuai nominal yang dikirim klien tanpa inflasi pajak tak terduga.
+25. `test_25`: **Validasi Ketat Koordinat Check-in**: Memverifikasi koordinat GPS tidak valid (string alfabet, `NaN`/`inf`, boolean, di luar rentang WGS84, atau parsial hanya latitude) ditolak dengan HTTP 400 alih-alih diabaikan secara diam-diam (*silent bypass*).
+26. `test_26`: **Isolasi Idempotency RBAC & Multi-Company**: Memverifikasi eliminasi `.sudo()` pada pencarian idempotency; driver tanpa hak billing ditolak dengan HTTP 403 saat mencoba me-replay key faktur, dan tabrakan key lintas perusahaan mengembalikan HTTP 409 Conflict tanpa membocorkan data faktur entitas lain.
+27. `test_27`: **Integritas Akun Jurnal Penjualan**: Memverifikasi pembuatan faktur mengikat langsung `default_account_id` dari jurnal penjualan tanpa melakukan pencarian manual `account.account`, mencegah *AccessError* dan menjamin penetapan akun pendapatan yang sah.
+28. `test_28`: **Penolakan Kunjungan Outlet Non-Aktif/Arsip**: Memverifikasi endpoint check-in menolak pencatatan kunjungan ke outlet yang telah dinonaktifkan atau diarsipkan (`active=False`) dengan respons HTTP 404.
+29. `test_29`: **Isolasi Hak Akses CRUD Partner**: Memverifikasi batasan ACL di mana driver dilarang membuat (*create*) atau menghapus (*unlink*) data partner (memicu *AccessError*), namun diizinkan memperbarui data operasional, sedangkan manajer memiliki hak penuh.
+30. `test_30`: **Pencegahan Driver Name Spoofing**: Memverifikasi penguncian Record Rule pada relasi kunci asing `driver_id = user.id` (`Many2one('res.users')`); pengiriman dengan teks `driver_name` tanpa `driver_id` tidak dapat diklaim pengemudi, dan pengubahan nama profil pengguna tidak dapat membobol data tugas pengemudi lain.
+31. `test_31`: **Verifikasi Flag noupdate Aturan Keamanan**: Memverifikasi seluruh `ir.rule` modul berstatus `noupdate=False` agar pembaruan modul (`-u`) selalu memperbarui aturan keamanan di database Odoo, sementara akun integrasi sistem tetap terlindungi (`noupdate=True`).
 
 ---
 
 ## ⚠️ Batasan Arsitektur & Ruang Lingkup (Known Limitations)
 
-Berikut adalah 4 batasan desain modul yang perlu diperhatikan secara jujur untuk deployment dan pengembangan lanjutan:
+Berikut adalah batasan desain dan karakteristik arsitektur modul yang perlu diperhatikan secara jujur untuk deployment dan pengembangan lanjutan:
 - **In-Memory Rate Guard pada Deployment Multi-Worker**: Penyimpanan sliding window dilakukan di memori proses Python lokal. Pada lingkungan produksi dengan `workers > 1` di `odoo.conf`, kuota dihitung per worker process; untuk klaster skala besar disarankan memadukannya dengan rate limiting di level reverse proxy (Nginx `limit_req_zone` / Cloudflare) atau Redis.
-- **Relasi Kurir Berbasis Nama (`driver_name`)**: Pencocokan Record Rule kurir pada `stock.picking` saat ini menggunakan pencocokan teks `driver_name = user.name` (`fields.Char`), belum menggunakan relasi kunci asing `Many2one('res.users')`.
+- **Relasi Kurir Berbasis Kunci Asing (`driver_id`)**: Penugasan kurir dan aturan Record Rule pada `stock.picking` serta `stock.move` telah menggunakan isolasi berbasis relasi kunci asing `driver_id = user.id` (`Many2one('res.users')`) guna mencegah eksploitasi manipulasi profil (*spoofing*), sedangkan field teks `driver_name` tetap dipertahankan dan disinkronkan secara otomatis demi menjaga kompatibilitas ke belakang (*backward compatibility*).
 - **Faktur API Berbasis Ringkasan Nominal Tunggal**: Endpoint `POST /api/v1/sfa/invoices` menerbitkan faktur penjualan satu baris nominal (`amount` dan `description`), belum mencakup rincian multi-baris SKU produk, diskon per item, atau kalkulasi pajak bertingkat.
 - **Pratinjau Peta Statis via Iframe OpenStreetMap**: Menggunakan komputasi HTML iframe OSM standar agar bebas biaya lisensi API dan ringan, bukan komponen JS interaktif berbasis OWL (Odoo Web Library).
 
@@ -362,9 +373,9 @@ addons/ibns_smart_ops/
 │   └── ir.model.access.csv      # Hak akses ACL per grup (tanpa izin unlink bebas)
 ├── tests/
 │   ├── __init__.py
-│   └── test_sfa_api.py          # 20 HttpCase test suites (Rate limit, Geofence, Idempotency, RBAC, Chatter)
+│   └── test_sfa_api.py          # 31 HttpCase test suites (Rate limit, Geofence, Idempotency, RBAC, Chatter)
 └── views/
-    ├── account_move_views.xml   # Form & tree inherit account.move: Tab & filter Idempotency Key
+    ├── account_move_views.xml   # Pewarisan form view account.move untuk menampilkan field sfa_idempotency_key di Info Akuntansi
     ├── delivery_route_views.xml # Form & list inherit stock.picking: Tab TMS & badge Delivered vs Invoiced
     ├── partner_tms_views.xml    # Form inherit res.partner: Tab TMS Geofence & widget peta OSM tersemat
     └── res_config_settings_views.xml # View konfigurasi pengaturan di Odoo Backend

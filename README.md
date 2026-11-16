@@ -64,9 +64,9 @@ Semua endpoint didekorasi dengan `save_session=False`, memastikan Odoo tidak mem
 | ![Tampilan Peta Outlet & Validasi Geofencing SFA](docs/screenshots/01-odoo-sfa-location.png) | ![Verifikasi REST API JSON & Geofencing Response](docs/screenshots/02-api-json-verification.png) |
 | *Iframe OpenStreetMap tersemat dengan koordinat GPS, radius geofence, dan integrasi Google Maps* | *Verifikasi eksekusi REST API SFA, respon JSON geofence verified, dan atribusi pengguna* |
 
-### 2. Hasil Eksekusi Automated Test Suite (31 Tests Pass)
-![Hasil Eksekusi 31 Integration Tests Odoo 18](docs/screenshots/03-test-suite-20-passing.png)
-*Eksekusi seluruh 31 integration test suite (HttpCase) di lingkungan Odoo 18: 0 failed, 0 errors (100% lulus).*
+### 2. Hasil Eksekusi Automated Test Suite (32 Tests Pass)
+![Hasil Eksekusi 32 Integration Tests Odoo 18](docs/screenshots/03-test-suite-32-passing.png)
+*Eksekusi seluruh 32 integration test suite (HttpCase) di lingkungan Odoo 18: 0 failed, 0 errors (100% lulus).*
 
 ---
 
@@ -294,7 +294,7 @@ http://localhost:8069
 
 ## 🧪 Panduan Menjalankan Automated Test Suite
 
-Modul ini dilengkapi dengan **31 integration test suite** yang berjalan otomatis pada framework Odoo `HttpCase` ([test_sfa_api.py](addons/ibns_smart_ops/tests/test_sfa_api.py)).
+Modul ini dilengkapi dengan **32 integration test suite** yang berjalan otomatis pada framework Odoo `HttpCase` ([test_sfa_api.py](addons/ibns_smart_ops/tests/test_sfa_api.py)).
 
 ### 1. Perintah Menjalankan Seluruh Test
 Jalankan perintah berikut di terminal:
@@ -340,6 +340,7 @@ docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 --test-tags
 29. `test_29`: **Isolasi Hak Akses CRUD Partner**: Memverifikasi batasan ACL di mana driver dilarang membuat (*create*) atau menghapus (*unlink*) data partner (memicu *AccessError*), namun diizinkan memperbarui data operasional, sedangkan manajer memiliki hak penuh.
 30. `test_30`: **Pencegahan Driver Name Spoofing**: Memverifikasi penguncian Record Rule pada relasi kunci asing `driver_id = user.id` (`Many2one('res.users')`); pengiriman dengan teks `driver_name` tanpa `driver_id` tidak dapat diklaim pengemudi, dan pengubahan nama profil pengguna tidak dapat membobol data tugas pengemudi lain.
 31. `test_31`: **Verifikasi Flag noupdate Aturan Keamanan**: Memverifikasi seluruh `ir.rule` modul berstatus `noupdate=False` agar pembaruan modul (`-u`) selalu memperbarui aturan keamanan di database Odoo, sementara akun integrasi sistem tetap terlindungi (`noupdate=True`).
+32. `test_32`: **Pembuatan Faktur via Sales Order & Rekonsiliasi Otomatis**: Memverifikasi pembuatan faktur penjualan via endpoint API menggunakan parameter opsional `sale_order_id` (termasuk validasi ketat tipe boolean, non-angka, ID tidak ditemukan, dan kaitan partner), pembuatan faktur otomatis via `sale_order._create_invoices()`, auto-post faktur dengan penyimpanan `sfa_idempotency_key`, serta otomatisasi pembaruan status `delivered_vs_invoiced_status` pada `stock.picking` menjadi `fully_reconciled`.
 
 ---
 
@@ -373,7 +374,7 @@ addons/ibns_smart_ops/
 │   └── ir.model.access.csv      # Hak akses ACL per grup (tanpa izin unlink bebas)
 ├── tests/
 │   ├── __init__.py
-│   └── test_sfa_api.py          # 31 HttpCase test suites (Rate limit, Geofence, Idempotency, RBAC, Chatter)
+│   └── test_sfa_api.py          # 32 HttpCase test suites (Rate limit, Geofence, Idempotency, RBAC, Chatter)
 └── views/
     ├── account_move_views.xml   # Pewarisan form view account.move untuk menampilkan field sfa_idempotency_key di Info Akuntansi
     ├── delivery_route_views.xml # Form & list inherit stock.picking: Tab TMS & badge Delivered vs Invoiced

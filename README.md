@@ -132,11 +132,16 @@ Authorization: Bearer <YOUR_SFA_API_KEY>
 X-IBNS-KEY: <YOUR_SFA_API_KEY>
 ```
 
-Untuk request mutasi data (seperti faktur), sertakan juga:
+#### Sifat Header Idempotency (`X-Idempotency-Key`):
+Header `X-Idempotency-Key` bersifat **opsional namun sangat disarankan** (*recommended for safe mutations*) untuk endpoint mutasi data seperti faktur (`POST /api/v1/sfa/invoices`):
 ```http
 X-Idempotency-Key: <UNIQUE_CLIENT_UUID>
 Content-Type: application/json
 ```
+*(Sistem juga mendukung pembacaan dari header `Idempotency-Key` atau properti payload JSON `idempotency_key`).*
+
+* **Jika Disertakan**: Sistem mengikat UUID unik ke record faktur di PostgreSQL (`sfa_idempotency_key`, `UNIQUE`). Jika terjadi gangguan koneksi / timeout jaringan dan klien mengirim ulang request (*retry*), sistem tidak membuat faktur ganda, melainkan mengembalikan data faktur yang telah dibuat sebelumnya dengan **HTTP 200 OK** dan flag `"idempotent_replay": true`.
+* **Jika Tidak Disertakan**: Request tetap diproses secara normal untuk membuat faktur baru (**HTTP 201 Created**) dengan `sfa_idempotency_key = null`, namun klien tidak mendapatkan garansi proteksi anti-duplikasi saat terjadi *network retry*.
 
 ---
 
@@ -217,9 +222,32 @@ curl -X POST "http://localhost:8069/api/v1/sfa/sync-visit" \
 ---
 
 ### 3. POST `/api/v1/sfa/invoices`
-Membuat faktur penjualan pelanggan (`account.move`, `move_type='out_invoice'`) secara atomik. Dilindungi Idempotency Guard via header `X-Idempotency-Key`.
+Membuat dan memposting faktur penjualan pelanggan (`account.move`, `move_type='out_invoice'`) secara atomik. Dilindungi Idempotency Guard (via header `X-Idempotency-Key` atau payload `idempotency_key`) dan validasi ketat multi-company.
 
-#### Request Contoh (cURL)
+Mendukung **2 Mode Operasi**:
+1. **Mode Sales Order (`sale_order_id`)**: Otomatis membuat faktur multi-baris produk dari pesanan penjualan (`sale_order._create_invoices()`), mengikat nomor referensi order, dan secara otomatis memperbarui status rekonsiliasi pengiriman (`delivered_vs_invoiced_status`) pada delivery order (`stock.picking`) terkait menjadi **`fully_reconciled`**.
+2. **Mode Ringkas Ad-hoc (`amount` & `description`)**: Untuk pencatatan penagihan instan/pelunasan lapangan tanpa order penjualan khusus.
+
+#### Spesifikasi Parameter Payload (JSON Body)
+- `partner_id` *(integer, wajib)*: ID pelanggan Odoo (`res.partner`). Tipe boolean ditolak (HTTP 400).
+- `sale_order_id` *(integer, opsional)*: ID Sales Order Odoo (`sale.order`). Tipe boolean ditolak (HTTP 400). Wajib merupakan order milik `partner_id` terkait.
+- `amount` *(float, wajib jika `sale_order_id` tidak dikirim)*: Nominal tagihan bersih. Wajib berupa angka finite lebih besar dari 0 ($\text{amount} > 0$). Nilai `NaN`, `inf`, `-inf`, atau $\le 0$ ditolak (HTTP 400). Jika `sale_order_id` diisi, `amount` bersifat opsional karena nilai total dihitung langsung dari baris pesanan penjualan.
+- `description` *(string, opsional)*: Deskripsi baris tagihan pada mode ringkas (default: `"SFA Field Invoice"`).
+- `idempotency_key` *(string, opsional)*: Alternatif penyertaan kunci idempotensi via body JSON jika klien tidak dapat mengirim custom header HTTP.
+
+#### Contoh Request A: Berdasarkan Sales Order (Auto-Reconcile Picking)
+```bash
+curl -X POST "http://localhost:8069/api/v1/sfa/invoices" \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer <YOUR_SFA_API_KEY>" \
+     -H "X-Idempotency-Key: sfa_so_invoice_uuid_9921" \
+     -d '{
+       "partner_id": 7,
+       "sale_order_id": 42
+     }'
+```
+
+#### Contoh Request B: Nominal Ringkas Ad-hoc Lapangan
 ```bash
 curl -X POST "http://localhost:8069/api/v1/sfa/invoices" \
      -H "Content-Type: application/json" \
@@ -232,7 +260,7 @@ curl -X POST "http://localhost:8069/api/v1/sfa/invoices" \
      }'
 ```
 
-#### Respon Sukses (201 Created - Faktur Baru)
+#### Respon Sukses (201 Created - Faktur Baru Berhasil Diposting)
 ```json
 {
   "status": "success",
@@ -245,15 +273,33 @@ curl -X POST "http://localhost:8069/api/v1/sfa/invoices" \
 }
 ```
 
+#### Respon Sukses (200 OK - Idempotent Replay)
+Jika header `X-Idempotency-Key` yang sama dikirim ulang:
+```json
+{
+  "status": "success",
+  "invoice_id": 14,
+  "invoice_name": "INV/2026/00014",
+  "amount_total": 250000.0,
+  "state": "posted",
+  "created_by": "Manajer Logistik",
+  "idempotent_replay": true
+}
+```
+
 #### Respon Kesalahan Standar
 - **400 Bad Request (Angka Tidak Finite: NaN / Infinity / $\le$ 0)**:
   `{"status": "error", "message": "amount must be a finite number greater than zero"}`
-- **400 Bad Request (Sintaks JSON Rusak)**:
-  `{"status": "error", "message": "Malformed JSON in request body"}`
-- **401 Unauthorized**:
+- **400 Bad Request (Validasi Input / Relasi Gagal)**:
+  `{"status": "error", "message": "Sale order does not belong to the specified partner"}` atau `{"status": "error", "message": "Malformed JSON in request body"}`
+- **401 Unauthorized (Token Absen atau Tidak Valid)**:
   `{"status": "error", "message": "Unauthorized: Invalid or inactive API key"}`
-- **403 Forbidden (Pelanggaran RBAC)**:
+- **403 Forbidden (Pelanggaran Hak Akses RBAC)**:
   `{"status": "error", "message": "Forbidden: Insufficient permissions to create or post invoices"}`
+- **404 Not Found (Resource / Outlet Tidak Ditemukan atau Non-Aktif/Arsip)**:
+  `{"status": "error", "message": "Outlet not found or archived"}` *(divalidasi di test_08 & test_28)*
+- **409 Conflict (Tabrakan Kunci Idempotensi Lintas Perusahaan / Database Constraint Violation)**:
+  `{"status": "error", "message": "Idempotency key collision or database constraint violated"}` *(divalidasi di test_26)*
 - **429 Too Many Requests (Rate Guard Terlampaui)**:
   `{"status": "error", "message": "Too Many Requests: Rate limit of 60 req/min exceeded. Retry after 45s."}`
 - **500 Internal Server Error (Masked Safe Response)**:
@@ -297,6 +343,32 @@ Buka browser dan navigasikan ke:
 ```
 http://localhost:8069
 ```
+
+### 5. Konfigurasi & Penerbitan API Key Pertama Kali
+Agar panggilan cURL pada bagian API Reference tidak ditolak dengan **HTTP 401 Unauthorized**, gunakan salah satu dari dua metode penerbitan API Key berikut:
+
+#### Opsi A: Menerbitkan Odoo Native API Key (Pengguna Riil / Role-based — Sangat Disarankan)
+Metode ini mengaitkan token secara langsung ke akun pengguna Odoo sehingga seluruh riwayat check-in dan pembuatan faktur tercatat atas nama pengguna tersebut (*audit trail*):
+1. Buka `http://localhost:8069` dan login dengan akun pengguna (misal: user dengan grup `ibns_smart_ops.group_sfa_manager` atau Administrator).
+2. Klik nama/avatar profil di pojok kanan atas, lalu pilih menu **Preferences** (atau **My Profile**).
+3. Buka tab **Account Security**.
+4. Pada baris **API Keys**, klik tombol **New API Key**.
+5. Masukkan kata sandi akun untuk verifikasi, beri nama/deskripsi kunci (contoh: `SFA Mobile Production`), lalu klik **Generate Key**.
+6. Salin kunci API yang ditampilkan (kunci hanya muncul satu kali). Gunakan kunci ini pada header:
+   ```bash
+   -H "Authorization: Bearer <API_KEY>"
+   # atau
+   -H "X-IBNS-KEY: <API_KEY>"
+   ```
+
+#### Opsi B: Menggunakan System Integration Secret Key (Machine-to-Machine)
+Jika ingin mengintegrasikan sistem backend tanpa bergantung pada profil pengguna interaktif:
+1. Cantumkan token rahasia pada file `.env` sebelum menjalankan container Docker:
+   ```env
+   SFA_API_SECRET_KEY=sfa_secure_integration_token_2026
+   ```
+2. Atau atur nilai konfigurasi melalui backend Odoo pada menu **Settings** ➔ **Technical** ➔ **Parameters** ➔ **System Parameters** dengan key `ibns_smart_ops.sfa_api_key`.
+3. Panggilan API yang menggunakan token ini otomatis diatribusikan ke akun sistem teknis `user_sfa_api_service`.
 
 ---
 
@@ -357,7 +429,7 @@ docker compose exec web /entrypoint.sh odoo -d odoo --http-port=8070 --test-tags
 Berikut adalah batasan desain dan karakteristik arsitektur modul yang perlu diperhatikan secara jujur untuk deployment dan pengembangan lanjutan:
 - **In-Memory Rate Guard pada Deployment Multi-Worker**: Penyimpanan sliding window dilakukan di memori proses Python lokal. Pada lingkungan produksi dengan `workers > 1` di `odoo.conf`, kuota dihitung per worker process; untuk klaster skala besar disarankan memadukannya dengan rate limiting di level reverse proxy (Nginx `limit_req_zone` / Cloudflare) atau Redis.
 - **Relasi Kurir Berbasis Kunci Asing (`driver_id`)**: Penugasan kurir dan aturan Record Rule pada `stock.picking` serta `stock.move` telah menggunakan isolasi berbasis relasi kunci asing `driver_id = user.id` (`Many2one('res.users')`) guna mencegah eksploitasi manipulasi profil (*spoofing*), sedangkan field teks `driver_name` tetap dipertahankan dan disinkronkan secara otomatis demi menjaga kompatibilitas ke belakang (*backward compatibility*).
-- **Faktur API Berbasis Ringkasan Nominal Tunggal**: Endpoint `POST /api/v1/sfa/invoices` menerbitkan faktur penjualan satu baris nominal (`amount` dan `description`), belum mencakup rincian multi-baris SKU produk, diskon per item, atau kalkulasi pajak bertingkat.
+- **Fleksibilitas Pembuatan Faktur API**: Endpoint `POST /api/v1/sfa/invoices` mendukung dua alur: (1) pembuatan faktur multi-baris produk penuh secara otomatis via `sale_order_id` menggunakan engine bawaan Odoo `sale.order._create_invoices()` yang otomatis merekonsiliasi delivery picking, atau (2) faktur ringkas ad-hoc satu baris nominal (`amount` dan `description`) untuk penagihan kas langsung di lapangan (tanpa rincian multi-baris SKU produk per item).
 - **Pratinjau Peta Statis via Iframe OpenStreetMap**: Menggunakan komputasi HTML iframe OSM standar agar bebas biaya lisensi API dan ringan, bukan komponen JS interaktif berbasis OWL (Odoo Web Library).
 
 ---

@@ -8,6 +8,14 @@
 [![Security & RBAC](https://img.shields.io/badge/Security-RBAC_&_Rate_Guard-2ea44f?style=for-the-badge&logo=fastapi&logoColor=white)](#-arsitektur-keamanan--kontrol-akses-rbac)
 [![License](https://img.shields.io/badge/License-LGPL--3-0052cc?style=for-the-badge)](LICENSE)
 
+## 🎥 Technical Walkthrough & Automated Test Proof (35s)
+
+[![Odoo 18 Backend Demo - ibns_smart_ops](https://img.youtube.com/vi/3zt5PyM0UMo/hqdefault.jpg)](https://youtu.be/3zt5PyM0UMo)
+
+> ▶️ **[Tonton Video Demo Teknis (35 Detik)](https://youtu.be/3zt5PyM0UMo)** — *Eksekusi 32 Automated HttpCase Integration Tests (`0 failed`), visualisasi OpenStreetMap tersemat, audit Geofencing Haversine, dan pembuatan faktur otomatis (`account.move`).*
+
+---
+
 > **Modul Backend TMS & Sales Force Automation (SFA) REST API untuk Odoo 18 Community.**  
 > Dirancang untuk memfasilitasi operasi distribusi logistik, visualisasi peta OpenStreetMap tersemat, validasi radius Geofencing, audit rekonsiliasi pengiriman vs penagihan, serta endpoint REST stateless yang aman dengan Rate Guard dan kontrol akses berbasis peran (RBAC).
 

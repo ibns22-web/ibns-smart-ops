@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 import psycopg2
-from odoo.exceptions import ValidationError
+from odoo.exceptions import AccessError, ValidationError
 from odoo.tests import HttpCase, tagged
 from odoo.tools import mute_logger
 from odoo.addons.ibns_smart_ops.controllers.sfa_api import _rate_limit_records
@@ -1818,6 +1818,103 @@ class TestSfaApi(HttpCase):
                 res_split_json.get('message'),
                 "Sale order generated multiple invoices; single-invoice SFA endpoint cannot process split invoices"
             )
+
+    def test_35_idempotency_payload_mismatch_and_access_error_masking(self):
+        """Memverifikasi:
+        1. Reuse X-Idempotency-Key dengan payload identik tetap mengembalikan HTTP 200 (idempotent_replay: True).
+        2. Reuse X-Idempotency-Key yang sama dengan amount berbeda atau partner_id berbeda ditolak dengan HTTP 409.
+        3. Respons HTTP 403 dari pelanggaran akses tidak mengandung string teknis ORM seperti
+           'res.partner', 'sale.order', 'account.move', atau 'record rules'.
+        """
+        # 1. Setup Idempotency Key dan Payload Awal
+        idem_key = f"idem_test35_{uuid.uuid4().hex}"
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': idem_key,
+        }
+        payload_orig = {
+            'partner_id': self.test_outlet.id,
+            'amount': 450000.0,
+            'description': 'Idempotency Payload Validation Test',
+        }
+
+        # Request 1 -> 201 Created
+        res1 = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_orig), headers=headers)
+        self.assertEqual(res1.status_code, 201, "Faktur pertama harus berhasil terbuat (HTTP 201)")
+        inv1_id = res1.json().get('invoice_id')
+        self.assertTrue(inv1_id)
+        self.assertFalse(res1.json().get('idempotent_replay'))
+
+        # Request 2 (Payload identik) -> 200 OK dengan idempotent_replay: True
+        res2 = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_orig), headers=headers)
+        self.assertEqual(res2.status_code, 200, "Replay payload identik harus mengembalikan HTTP 200")
+        self.assertTrue(res2.json().get('idempotent_replay'))
+        self.assertEqual(res2.json().get('invoice_id'), inv1_id)
+
+        # 2. Reuse Idempotency Key dengan payload berbeda -> HTTP 409 Mismatch
+        # 2a. Amount berbeda (500.000 vs 450.000)
+        payload_diff_amount = {
+            'partner_id': self.test_outlet.id,
+            'amount': 500000.0,
+            'description': 'Idempotency Payload Validation Test',
+        }
+        res_diff_amt = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_diff_amount), headers=headers)
+        self.assertEqual(res_diff_amt.status_code, 409, "Replay dengan amount berbeda harus ditolak dengan HTTP 409")
+        self.assertEqual(
+            res_diff_amt.json().get('message'),
+            "Idempotency key already used with different request parameters"
+        )
+
+        # 2b. Partner berbeda
+        other_partner = self.env['res.partner'].create({
+            'name': 'Partner Mismatch Test 35',
+            'customer_rank': 1,
+        })
+        payload_diff_partner = {
+            'partner_id': other_partner.id,
+            'amount': 450000.0,
+            'description': 'Idempotency Payload Validation Test',
+        }
+        res_diff_partner = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_diff_partner), headers=headers)
+        self.assertEqual(res_diff_partner.status_code, 409, "Replay dengan partner berbeda harus ditolak dengan HTTP 409")
+        self.assertEqual(
+            res_diff_partner.json().get('message'),
+            "Idempotency key already used with different request parameters"
+        )
+
+        # 3. Masking Pesan AccessError: Tidak mengandung string teknis ORM internal
+        # 3a. Pengujian menggunakan akun Driver (tanpa izin pembuatan faktur / account.move)
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', self.driver_token)
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', str(self.sfa_driver.id))
+        driver_headers = {
+            'X-IBNS-KEY': self.driver_token,
+            'Content-Type': 'application/json',
+        }
+        res_driver_inv = self.url_open(
+            '/api/v1/sfa/invoices',
+            data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 100000.0}),
+            headers=driver_headers
+        )
+        self.assertEqual(res_driver_inv.status_code, 403, "Driver harus ditolak dengan HTTP 403")
+        msg_driver = res_driver_inv.json().get('message', '')
+        self.assertEqual(msg_driver, "Forbidden: Insufficient permissions to create or post invoices")
+        for technical_str in ['res.partner', 'sale.order', 'account.move', 'record rules']:
+            self.assertNotIn(technical_str, msg_driver.lower(), f"Pesan error tidak boleh membocorkan string teknis '{technical_str}'")
+
+        # 3b. Pengujian simulasi AccessError saat browse partner
+        from unittest.mock import patch
+        with patch.object(type(self.env['res.partner']), 'browse', side_effect=AccessError("Document model res.partner restricted by record rules")):
+            res_partner_err = self.url_open(
+                '/api/v1/sfa/invoices',
+                data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 100000.0}),
+                headers={'X-IBNS-KEY': self.valid_token, 'Content-Type': 'application/json'}
+            )
+            self.assertEqual(res_partner_err.status_code, 403)
+            msg_p = res_partner_err.json().get('message', '')
+            self.assertEqual(msg_p, "Forbidden: Insufficient permissions to access partner")
+            for technical_str in ['res.partner', 'sale.order', 'account.move', 'record rules']:
+                self.assertNotIn(technical_str, msg_p.lower(), f"Pesan error tidak boleh membocorkan string teknis '{technical_str}'")
 
 
 

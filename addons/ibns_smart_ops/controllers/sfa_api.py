@@ -321,6 +321,27 @@ class SfaApiController(http.Controller):
         ctx = dict(request.env.context, allowed_company_ids=allowed_ids)
         return request.env(user=user, context=ctx), None
 
+    def _is_idempotent_payload_matching(self, existing_move, partner, target_company, sale_order=None, amount=None):
+        """Memvalidasi kesesuaian parameter payload request dengan faktur (account.move) yang sudah ada
+        untuk mencegah penggunaan ulang Idempotency Key dengan parameter berbeda (HTTP 409).
+        """
+        if existing_move.company_id.id != target_company.id:
+            return False
+
+        if sale_order is not None:
+            return bool(
+                existing_move.id in sale_order.invoice_ids.ids and
+                existing_move.partner_id.commercial_partner_id.id == partner.commercial_partner_id.id
+            )
+        else:
+            if amount is None:
+                return False
+            return bool(
+                existing_move.partner_id.id == partner.id and
+                not existing_move.invoice_origin and
+                existing_move.currency_id.compare_amounts(existing_move.amount_total, amount) == 0
+            )
+
     @http.route('/api/v1/sfa/outlets', type='http', auth='public', methods=['GET'], csrf=False, save_session=False)
     def get_outlets(self, **kwargs):
         """Mengambil daftar outlet/pelanggan lengkap beserta koordinat GPS dengan dukungan pagination.
@@ -400,7 +421,7 @@ class SfaApiController(http.Controller):
         except AccessError as ae:
             _logger.warning("AccessError in get_outlets for user %s: %s", user.login, str(ae))
             return Response(
-                json.dumps({'status': 'error', 'message': f'Forbidden: {str(ae)}'}),
+                json.dumps({'status': 'error', 'message': 'Forbidden: Insufficient permissions to access outlets'}),
                 content_type='application/json;charset=utf-8',
                 status=403
             )
@@ -471,7 +492,7 @@ class SfaApiController(http.Controller):
         except AccessError as ae:
             _logger.warning("AccessError browsing partner %s by user %s: %s", outlet_id, user.login, str(ae))
             return Response(
-                json.dumps({"status": "error", "message": f"Forbidden: {str(ae)}"}),
+                json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to access outlet"}),
                 content_type="application/json;charset=utf-8",
                 status=403
             )
@@ -576,7 +597,7 @@ class SfaApiController(http.Controller):
             user_env.cr.rollback()
             _logger.warning("AccessError posting chatter note by user %s: %s", user.login, str(ae))
             return Response(
-                json.dumps({"status": "error", "message": f"Forbidden: {str(ae)}"}),
+                json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to log field visit"}),
                 content_type="application/json;charset=utf-8",
                 status=403
             )
@@ -638,6 +659,7 @@ class SfaApiController(http.Controller):
                     status=400
                 )
 
+        amount = None
         if sale_order_id is None:
             raw_amount = payload.get('amount')
             if raw_amount is None:
@@ -727,7 +749,7 @@ class SfaApiController(http.Controller):
         except AccessError as ae:
             _logger.warning("AccessError browsing partner %s by user %s: %s", partner_id, user.login, str(ae))
             return Response(
-                json.dumps({"status": "error", "message": f"Forbidden: {str(ae)}"}),
+                json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to access partner"}),
                 content_type="application/json;charset=utf-8",
                 status=403
             )
@@ -771,7 +793,7 @@ class SfaApiController(http.Controller):
             except AccessError as ae:
                 _logger.warning("AccessError browsing sale.order %s by user %s: %s", sale_order_id, user.login, str(ae))
                 return Response(
-                    json.dumps({"status": "error", "message": f"Forbidden: Insufficient permissions to access sale order ({str(ae)})"}),
+                    json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to access sale order"}),
                     content_type="application/json;charset=utf-8",
                     status=403
                 )
@@ -783,6 +805,15 @@ class SfaApiController(http.Controller):
                     ('sfa_idempotency_key', '=', idempotency_key),
                 ], limit=1)
                 if existing_move:
+                    if not self._is_idempotent_payload_matching(existing_move, partner, target_company, sale_order=sale_order, amount=amount):
+                        return Response(
+                            json.dumps({
+                                "status": "error",
+                                "message": "Idempotency key already used with different request parameters"
+                            }),
+                            content_type="application/json;charset=utf-8",
+                            status=409
+                        )
                     _logger.info("Idempotent replay detected for key '%s'. Returning existing invoice %s",
                                  idempotency_key, existing_move.name)
                     return Response(
@@ -801,7 +832,7 @@ class SfaApiController(http.Controller):
             except AccessError as ae:
                 _logger.warning("AccessError during idempotency check by user %s: %s", user.login, str(ae))
                 return Response(
-                    json.dumps({"status": "error", "message": f"Forbidden: Insufficient permissions to access invoices ({str(ae)})"}),
+                    json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to access invoices"}),
                     content_type="application/json;charset=utf-8",
                     status=403
                 )
@@ -889,7 +920,7 @@ class SfaApiController(http.Controller):
             user_env.cr.rollback()
             _logger.warning("AccessError creating/posting invoice by user %s: %s", user.login, str(ae))
             return Response(
-                json.dumps({"status": "error", "message": f"Forbidden: Insufficient permissions to create or post invoices ({str(ae)})"}),
+                json.dumps({"status": "error", "message": "Forbidden: Insufficient permissions to create or post invoices"}),
                 content_type="application/json;charset=utf-8",
                 status=403
             )
@@ -910,6 +941,15 @@ class SfaApiController(http.Controller):
                         ('sfa_idempotency_key', '=', idempotency_key),
                     ], limit=1)
                     if existing_move:
+                        if not self._is_idempotent_payload_matching(existing_move, partner, target_company, sale_order=sale_order, amount=amount):
+                            return Response(
+                                json.dumps({
+                                    "status": "error",
+                                    "message": "Idempotency key already used with different request parameters"
+                                }),
+                                content_type="application/json;charset=utf-8",
+                                status=409
+                            )
                         _logger.info("Concurrent race-condition resolved for idempotency key '%s'. Returning existing invoice %s",
                                      idempotency_key, existing_move.name)
                         return Response(

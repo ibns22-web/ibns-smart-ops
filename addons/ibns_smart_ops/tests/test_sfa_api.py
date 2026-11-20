@@ -1902,19 +1902,21 @@ class TestSfaApi(HttpCase):
         for technical_str in ['res.partner', 'sale.order', 'account.move', 'record rules']:
             self.assertNotIn(technical_str, msg_driver.lower(), f"Pesan error tidak boleh membocorkan string teknis '{technical_str}'")
 
-        # 3b. Pengujian simulasi AccessError saat browse partner
+        # 3b. Pengujian simulasi AccessError saat message_post di sync_visit_data
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', self.valid_token)
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', str(self.sfa_manager.id))
         from unittest.mock import patch
-        with patch.object(type(self.env['res.partner']), 'browse', side_effect=AccessError("Document model res.partner restricted by record rules")):
-            res_partner_err = self.url_open(
-                '/api/v1/sfa/invoices',
-                data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 100000.0}),
+        with patch.object(type(self.env['res.partner']), 'message_post', side_effect=AccessError("Document model res.partner restricted by record rules")):
+            res_visit_err = self.url_open(
+                '/api/v1/sfa/sync-visit',
+                data=json.dumps({'outlet_id': self.test_outlet.id, 'notes': 'Check-in catatan kunjungan'}),
                 headers={'X-IBNS-KEY': self.valid_token, 'Content-Type': 'application/json'}
             )
-            self.assertEqual(res_partner_err.status_code, 403)
-            msg_p = res_partner_err.json().get('message', '')
-            self.assertEqual(msg_p, "Forbidden: Insufficient permissions to access partner")
+            self.assertEqual(res_visit_err.status_code, 403)
+            msg_visit = res_visit_err.json().get('message', '')
+            self.assertEqual(msg_visit, "Forbidden: Insufficient permissions to log field visit")
             for technical_str in ['res.partner', 'sale.order', 'account.move', 'record rules']:
-                self.assertNotIn(technical_str, msg_p.lower(), f"Pesan error tidak boleh membocorkan string teknis '{technical_str}'")
+                self.assertNotIn(technical_str, msg_visit.lower(), f"Pesan error tidak boleh membocorkan string teknis '{technical_str}'")
 
 
 

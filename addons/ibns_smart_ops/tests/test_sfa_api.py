@@ -911,7 +911,9 @@ class TestSfaApi(HttpCase):
         1. get_outlets() membaca partner milik Perusahaan B jika user memiliki hak ke Perusahaan B.
         2. sync_visit_data() mencatat kunjungan pada partner milik Perusahaan B tanpa AccessError.
         3. create_invoice() berhasil menerbitkan faktur untuk partner milik Perusahaan B dengan
-           company_id dan jurnal Perusahaan B yang sesuai (bebas dari error Incompatible companies)."""
+           company_id dan jurnal Perusahaan B yang sesuai (bebas dari error Incompatible companies).
+        4. create_invoice() menolak pembuatan faktur dengan HTTP 400 jika target_company belum memiliki
+           jurnal penjualan (mencegah fallback ke jurnal perusahaan lain yang memicu Incompatible companies)."""
         # 1. Setup Perusahaan B
         company_b = self.env['res.company'].create({
             'name': 'IBNS Distribusi Cabang B',
@@ -998,6 +1000,29 @@ class TestSfaApi(HttpCase):
         self.assertEqual(created_invoice.company_id.id, company_b.id, "Faktur harus terbit di bawah Perusahaan B")
         self.assertEqual(created_invoice.journal_id.id, journal_b.id, "Faktur harus menggunakan jurnal Perusahaan B")
         self.assertEqual(created_invoice.state, 'posted', "Faktur harus sukses terposting (posted)")
+
+        # 4. Validasi: Penolakan pembuatan faktur jika target company tidak memiliki jurnal penjualan (tanpa fallback)
+        company_no_journal = self.env['res.company'].create({
+            'name': 'IBNS Distribusi Cabang Tanpa Jurnal',
+            'currency_id': self.env.company.currency_id.id,
+        })
+        self.sfa_manager.write({
+            'company_ids': [(4, company_no_journal.id)]
+        })
+        partner_no_journal = self.env['res.partner'].create({
+            'name': 'Outlet Cabang Tanpa Jurnal',
+            'company_id': company_no_journal.id,
+            'customer_rank': 1,
+        })
+        payload_no_journal = {
+            'partner_id': partner_no_journal.id,
+            'amount': 250000.0,
+            'description': 'Penagihan Cabang Tanpa Jurnal'
+        }
+        res_no_journal = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_no_journal), headers=headers)
+        self.assertEqual(res_no_journal.status_code, 400, "Pembuatan faktur harus ditolak HTTP 400 jika target company tidak memiliki jurnal penjualan")
+        self.assertIn('not found', res_no_journal.json().get('message', '').lower())
+        self.assertIn('sale journal', res_no_journal.json().get('message', '').lower())
 
     def test_23_boolean_type_coercion_rejection(self):
         """Memverifikasi bahwa payload dengan tipe data boolean (true/false) ditolak dengan HTTP 400

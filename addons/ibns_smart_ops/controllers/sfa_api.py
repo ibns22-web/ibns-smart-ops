@@ -770,10 +770,11 @@ class SfaApiController(http.Controller):
                     ('company_id', '=', target_company.id)
                 ], limit=1)
                 if not journal:
-                    journal = user_env['account.journal'].search([('type', '=', 'sale')], limit=1)
-                if not journal:
                     return Response(
-                        json.dumps({"status": "error", "message": "Default sale journal not found"}),
+                        json.dumps({
+                            "status": "error",
+                            "message": f"Sale journal for company '{target_company.name}' not found"
+                        }),
                         content_type="application/json;charset=utf-8",
                         status=400
                     )

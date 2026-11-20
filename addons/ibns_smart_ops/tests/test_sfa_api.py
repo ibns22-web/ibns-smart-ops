@@ -1675,6 +1675,150 @@ class TestSfaApi(HttpCase):
         self.assertEqual(res_inv_forbidden.status_code, 403)
         self.assertEqual(res_inv_forbidden.json().get('message'), "Forbidden: You do not have access to the requested company")
 
+    def test_34_sale_order_multi_company_and_shared_partner_invoicing(self):
+        """Memverifikasi penanganan mode sale_order_id pada multi-company:
+        1. Partner shared (company_id=False) dengan sale.order milik Company B berhasil di-invoice
+           tanpa error Incompatible companies dan invoice yang terbentuk memakai company_id == company_b.id.
+        2. User tanpa akses ke company milik sale.order ditolak dengan HTTP 403.
+        3. Penolakan ketika SO menghasilkan multiple invoices (len > 1) dengan HTTP 400 dan rollback.
+        """
+        # 1. Setup Perusahaan B
+        company_b = self.env['res.company'].create({
+            'name': 'IBNS Distribusi Cabang B SO',
+            'currency_id': self.env.ref('base.IDR').id if self.env.ref('base.IDR', raise_if_not_found=False) else self.env.company.currency_id.id,
+        })
+        income_account_b = self.env['account.account'].create({
+            'name': 'Pendapatan Cabang B SO',
+            'code': f'498{uuid.uuid4().hex[:4]}',
+            'account_type': 'income',
+            'company_ids': [(6, 0, [company_b.id])],
+        })
+        receivable_account_b = self.env['account.account'].create({
+            'name': 'Piutang Cabang B SO',
+            'code': f'112{uuid.uuid4().hex[:4]}',
+            'account_type': 'asset_receivable',
+            'company_ids': [(6, 0, [company_b.id])],
+            'reconcile': True,
+        })
+        journal_b = self.env['account.journal'].create({
+            'name': 'Penjualan Cabang B SO',
+            'type': 'sale',
+            'code': f'S{uuid.uuid4().hex[:3]}',
+            'company_id': company_b.id,
+            'default_account_id': income_account_b.id,
+        })
+
+        # Berikan hak akses Perusahaan B ke sfa_manager
+        self.sfa_manager.write({
+            'company_ids': [(4, company_b.id)]
+        })
+
+        # Partner bersifat shared (company_id=False)
+        shared_partner = self.env['res.partner'].create({
+            'name': 'Pelanggan Shared Nasional',
+            'company_id': False,
+            'customer_rank': 1,
+            'property_account_receivable_id': receivable_account_b.id,
+        })
+
+        test_product = self.env['product.product'].create({
+            'name': 'Produk Multi-Company SO',
+            'type': 'consu',
+            'list_price': 200000.0,
+            'taxes_id': False,
+        })
+
+        # Sale Order milik Perusahaan B
+        so_b = self.env['sale.order'].with_company(company_b).create({
+            'partner_id': shared_partner.id,
+            'company_id': company_b.id,
+            'order_line': [(0, 0, {
+                'product_id': test_product.id,
+                'product_uom_qty': 2.0,
+                'price_unit': 200000.0,
+                'tax_id': False,
+            })],
+        })
+        so_b.action_confirm()
+
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+        payload_b = {
+            'partner_id': shared_partner.id,
+            'sale_order_id': so_b.id,
+        }
+
+        # Request default tanpa header X-Company-Id (active user company adalah Company A / main company)
+        res_b = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_b), headers=headers)
+        self.assertEqual(res_b.status_code, 201, "Shared partner dengan SO milik Perusahaan B harus berhasil dibuatkan faktur")
+        data_b = res_b.json()
+        self.assertEqual(data_b.get('status'), 'success')
+        invoice_id_b = data_b.get('invoice_id')
+        self.assertTrue(invoice_id_b)
+
+        invoice_b = self.env['account.move'].browse(invoice_id_b)
+        self.assertTrue(invoice_b.exists())
+        self.assertEqual(invoice_b.company_id.id, company_b.id, "Invoice yang terbentuk harus memakai company_id == company_b.id")
+        self.assertEqual(invoice_b.journal_id.id, journal_b.id, "Invoice harus memakai jurnal Perusahaan B")
+        self.assertEqual(invoice_b.state, 'posted', "Invoice harus berstatus posted")
+
+        # 2. User tanpa akses ke company milik sale.order ditolak dengan HTTP 403
+        company_c = self.env['res.company'].create({
+            'name': 'Perusahaan C Tanpa Akses SO',
+            'currency_id': self.env.company.currency_id.id,
+        })
+        self.assertNotIn(company_c.id, self.sfa_manager.company_ids.ids)
+
+        so_c = self.env['sale.order'].sudo().with_company(company_c).create({
+            'partner_id': shared_partner.id,
+            'company_id': company_c.id,
+            'order_line': [(0, 0, {
+                'product_id': test_product.id,
+                'product_uom_qty': 1.0,
+                'price_unit': 100000.0,
+                'tax_id': False,
+            })],
+        })
+        so_c.sudo().action_confirm()
+
+        payload_c = {
+            'partner_id': shared_partner.id,
+            'sale_order_id': so_c.id,
+        }
+        res_c = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_c), headers=headers)
+        self.assertEqual(res_c.status_code, 403, "User tanpa akses ke company milik SO harus ditolak HTTP 403")
+        res_c_json = res_c.json()
+        self.assertEqual(res_c_json.get('status'), 'error')
+        self.assertIn("Forbidden", res_c_json.get('message', ''))
+
+        # 3. Penolakan ketika SO menghasilkan multiple invoices (len > 1) dengan HTTP 400
+        from unittest.mock import patch
+        dummy_inv_1 = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'partner_id': self.test_outlet.id,
+            'company_id': self.env.company.id,
+            'journal_id': self.sale_journal.id,
+            'invoice_line_ids': [(0, 0, {'name': 'Split Line 1', 'price_unit': 150000.0})],
+        })
+        dummy_inv_2 = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'partner_id': self.test_outlet.id,
+            'company_id': self.env.company.id,
+            'journal_id': self.sale_journal.id,
+            'invoice_line_ids': [(0, 0, {'name': 'Split Line 2', 'price_unit': 150000.0})],
+        })
+        with patch.object(type(self.env['sale.order']), '_create_invoices', return_value=dummy_inv_1 + dummy_inv_2):
+            res_split = self.url_open('/api/v1/sfa/invoices', data=json.dumps(payload_b), headers=headers)
+            self.assertEqual(res_split.status_code, 400, "Split invoices harus ditolak HTTP 400")
+            res_split_json = res_split.json()
+            self.assertEqual(res_split_json.get('status'), 'error')
+            self.assertEqual(
+                res_split_json.get('message'),
+                "Sale order generated multiple invoices; single-invoice SFA endpoint cannot process split invoices"
+            )
+
 
 
 

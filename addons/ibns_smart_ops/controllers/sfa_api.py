@@ -755,6 +755,19 @@ class SfaApiController(http.Controller):
                         content_type="application/json;charset=utf-8",
                         status=400
                     )
+                if sale_order.company_id not in user.company_ids:
+                    return Response(
+                        json.dumps({"status": "error", "message": "Forbidden: You do not have access to the sale order's company"}),
+                        content_type="application/json;charset=utf-8",
+                        status=403
+                    )
+                if sale_order.company_id in user.company_ids and sale_order.company_id != user_env.company:
+                    target_company = sale_order.company_id
+                    user_env, env_error = self._get_user_env(user, target_company=target_company)
+                    if env_error:
+                        return env_error
+                    partner = partner.with_env(user_env)
+                    sale_order = sale_order.with_env(user_env)
             except AccessError as ae:
                 _logger.warning("AccessError browsing sale.order %s by user %s: %s", sale_order_id, user.login, str(ae))
                 return Response(
@@ -799,6 +812,16 @@ class SfaApiController(http.Controller):
                 if not invoices:
                     return Response(
                         json.dumps({"status": "error", "message": "No invoiceable lines found for this sale order"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+                if len(invoices) > 1:
+                    user_env.cr.rollback()
+                    return Response(
+                        json.dumps({
+                            "status": "error",
+                            "message": "Sale order generated multiple invoices; single-invoice SFA endpoint cannot process split invoices"
+                        }),
                         content_type="application/json;charset=utf-8",
                         status=400
                     )

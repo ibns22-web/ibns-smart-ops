@@ -264,30 +264,62 @@ class SfaApiController(http.Controller):
         Memastikan 'allowed_company_ids' selalu terisi dari user.company_ids agar tidak terblokir
         oleh Record Rules multi-company, dan menempatkan target_company di urutan pertama sebagai active company.
         Mendukung juga preferensi company via header 'X-Company-Id'.
+        Mengembalikan tuple (user_env, error_response).
         """
         user_companies = user.company_ids
         if not user_companies:
             user_companies = user.company_id
 
-        if target_company and target_company in user_companies:
-            active_company = target_company
+        has_cid_header = 'X-Company-Id' in request.httprequest.headers or 'x-company-id' in request.httprequest.headers
+        raw_cid = request.httprequest.headers.get('X-Company-Id')
+        if not has_cid_header and raw_cid is not None:
+            has_cid_header = True
+
+        if target_company:
+            active_company = target_company if target_company in user_companies else (user.company_id if user.company_id in user_companies else user_companies[0])
+        elif has_cid_header:
+            if isinstance(raw_cid, (bool, float)) or raw_cid is None:
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Invalid X-Company-Id header: must be a positive integer"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+            cid_str = str(raw_cid).strip()
+            if not cid_str:
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Invalid X-Company-Id header: must be a positive integer"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+            try:
+                cid = int(cid_str)
+                if cid <= 0 or not cid_str.isdigit():
+                    return None, Response(
+                        json.dumps({"status": "error", "message": "Invalid X-Company-Id header: must be a positive integer"}),
+                        content_type="application/json;charset=utf-8",
+                        status=400
+                    )
+            except (ValueError, TypeError):
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Invalid X-Company-Id header: must be a positive integer"}),
+                    content_type="application/json;charset=utf-8",
+                    status=400
+                )
+
+            if cid not in user_companies.ids:
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Forbidden: You do not have access to the requested company"}),
+                    content_type="application/json;charset=utf-8",
+                    status=403
+                )
+
+            active_company = user_companies.filtered(lambda c: c.id == cid)[0]
         else:
-            header_cid = request.httprequest.headers.get('X-Company-Id')
-            active_company = None
-            if header_cid:
-                try:
-                    cid = int(header_cid)
-                    match_comp = user_companies.filtered(lambda c: c.id == cid)
-                    if match_comp:
-                        active_company = match_comp[0]
-                except (ValueError, TypeError):
-                    pass
-            if not active_company:
-                active_company = user.company_id if user.company_id in user_companies else user_companies[0]
+            active_company = user.company_id if user.company_id in user_companies else user_companies[0]
 
         allowed_ids = [active_company.id] + [cid for cid in user_companies.ids if cid != active_company.id]
         ctx = dict(request.env.context, allowed_company_ids=allowed_ids)
-        return request.env(user=user, context=ctx)
+        return request.env(user=user, context=ctx), None
 
     @http.route('/api/v1/sfa/outlets', type='http', auth='public', methods=['GET'], csrf=False, save_session=False)
     def get_outlets(self, **kwargs):
@@ -306,7 +338,9 @@ class SfaApiController(http.Controller):
         if auth_error:
             return auth_error
 
-        user_env = self._get_user_env(user)
+        user_env, env_error = self._get_user_env(user)
+        if env_error:
+            return env_error
 
         # Parsing parameter pagination
         try:
@@ -411,7 +445,9 @@ class SfaApiController(http.Controller):
                 status=400
             )
 
-        user_env = self._get_user_env(user)
+        user_env, env_error = self._get_user_env(user)
+        if env_error:
+            return env_error
 
         try:
             partner = user_env['res.partner'].browse(int(outlet_id))
@@ -422,7 +458,9 @@ class SfaApiController(http.Controller):
                     status=404
                 )
             if partner.company_id and partner.company_id in user.company_ids and partner.company_id != user_env.company:
-                user_env = self._get_user_env(user, target_company=partner.company_id)
+                user_env, env_error = self._get_user_env(user, target_company=partner.company_id)
+                if env_error:
+                    return env_error
                 partner = partner.with_env(user_env)
         except (ValueError, TypeError):
             return Response(
@@ -668,7 +706,9 @@ class SfaApiController(http.Controller):
         if idempotency_key:
             idempotency_key = str(idempotency_key).strip()
 
-        user_env = self._get_user_env(user)
+        user_env, env_error = self._get_user_env(user)
+        if env_error:
+            return env_error
 
         try:
             partner = user_env['res.partner'].browse(int(partner_id))
@@ -694,7 +734,9 @@ class SfaApiController(http.Controller):
 
         # Evaluasi target company berdasarkan partner (atau fallback active company user)
         target_company = partner.company_id if partner.company_id and partner.company_id in user.company_ids else user_env.company
-        user_env = self._get_user_env(user, target_company=target_company)
+        user_env, env_error = self._get_user_env(user, target_company=target_company)
+        if env_error:
+            return env_error
         partner = partner.with_env(user_env)
 
         sale_order = None

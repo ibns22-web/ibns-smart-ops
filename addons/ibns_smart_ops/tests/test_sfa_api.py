@@ -1604,6 +1604,77 @@ class TestSfaApi(HttpCase):
         self.assertTrue(res_replay.json().get('idempotent_replay'))
         self.assertEqual(res_replay.json().get('invoice_id'), invoice_id)
 
+    def test_33_x_company_id_header_validation(self):
+        """Memverifikasi validasi ketat header 'X-Company-Id' pada _get_user_env():
+        1. X-Company-Id format salah ("abc", "", "-1", "1.5") menghasilkan HTTP 400.
+        2. X-Company-Id di luar user.company_ids (company lain & ID tidak ada) menghasilkan HTTP 403.
+        3. X-Company-Id valid milik user tetap menghasilkan HTTP 200.
+        """
+        # 1. Format salah: "abc", "", "-1", "1.5" -> HTTP 400
+        invalid_formats = ["abc", "", "-1", "1.5"]
+        for bad_val in invalid_formats:
+            headers = {
+                'X-IBNS-KEY': self.valid_token,
+                'X-Company-Id': bad_val,
+            }
+            res = self.url_open('/api/v1/sfa/outlets', headers=headers)
+            self.assertEqual(res.status_code, 400, f"X-Company-Id '{bad_val}' harus ditolak dengan HTTP 400")
+            res_json = res.json()
+            self.assertEqual(res_json.get('status'), 'error')
+            self.assertEqual(res_json.get('message'), "Invalid X-Company-Id header: must be a positive integer")
+
+        # 2. X-Company-Id di luar user.company_ids (company lain & ID tidak ada) -> HTTP 403
+        unauthorized_company = self.env['res.company'].create({
+            'name': 'Perusahaan Tanpa Izin SFA',
+            'currency_id': self.env.company.currency_id.id,
+        })
+        headers_other = {
+            'X-IBNS-KEY': self.valid_token,
+            'X-Company-Id': str(unauthorized_company.id),
+        }
+        res_other = self.url_open('/api/v1/sfa/outlets', headers=headers_other)
+        self.assertEqual(res_other.status_code, 403, "X-Company-Id milik company lain harus ditolak dengan HTTP 403")
+        res_other_json = res_other.json()
+        self.assertEqual(res_other_json.get('status'), 'error')
+        self.assertEqual(res_other_json.get('message'), "Forbidden: You do not have access to the requested company")
+
+        # ID tidak ada di database
+        headers_nonexistent = {
+            'X-IBNS-KEY': self.valid_token,
+            'X-Company-Id': '999999',
+        }
+        res_nonexistent = self.url_open('/api/v1/sfa/outlets', headers=headers_nonexistent)
+        self.assertEqual(res_nonexistent.status_code, 403, "X-Company-Id non-existent ID harus ditolak dengan HTTP 403")
+        res_nonexistent_json = res_nonexistent.json()
+        self.assertEqual(res_nonexistent_json.get('status'), 'error')
+        self.assertEqual(res_nonexistent_json.get('message'), "Forbidden: You do not have access to the requested company")
+
+        # 3. X-Company-Id valid milik user -> HTTP 200
+        headers_valid = {
+            'X-IBNS-KEY': self.valid_token,
+            'X-Company-Id': str(self.env.company.id),
+        }
+        res_valid = self.url_open('/api/v1/sfa/outlets', headers=headers_valid)
+        self.assertEqual(res_valid.status_code, 200, "X-Company-Id valid milik user harus diterima dengan HTTP 200")
+        self.assertEqual(res_valid.json().get('status'), 'success')
+
+        # Verifikasi konsistensi validasi header pada endpoint POST sync-visit dan invoices
+        res_post_bad = self.url_open(
+            '/api/v1/sfa/sync-visit',
+            data=json.dumps({'outlet_id': self.test_outlet.id}),
+            headers={'X-IBNS-KEY': self.valid_token, 'Content-Type': 'application/json', 'X-Company-Id': 'abc'}
+        )
+        self.assertEqual(res_post_bad.status_code, 400)
+        self.assertEqual(res_post_bad.json().get('message'), "Invalid X-Company-Id header: must be a positive integer")
+
+        res_inv_forbidden = self.url_open(
+            '/api/v1/sfa/invoices',
+            data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 100000.0}),
+            headers={'X-IBNS-KEY': self.valid_token, 'Content-Type': 'application/json', 'X-Company-Id': '999999'}
+        )
+        self.assertEqual(res_inv_forbidden.status_code, 403)
+        self.assertEqual(res_inv_forbidden.json().get('message'), "Forbidden: You do not have access to the requested company")
+
 
 
 

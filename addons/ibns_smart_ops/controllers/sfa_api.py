@@ -250,6 +250,15 @@ class SfaApiController(http.Controller):
                     status=401
                 )
 
+            user_sudo = authenticated_user.sudo()
+            if not (user_sudo.has_group('ibns_smart_ops.group_sfa_user') or user_sudo.has_group('base.group_system')):
+                _logger.warning("SFA API request rejected: User %s lacks required SFA group authorization.", authenticated_user.login)
+                return None, Response(
+                    json.dumps({"status": "error", "message": "Forbidden: User does not have SFA API access"}),
+                    content_type="application/json;charset=utf-8",
+                    status=403
+                )
+
             return authenticated_user, None
         except Exception as e:
             _logger.warning("Unexpected error during authentication: %s", str(e))

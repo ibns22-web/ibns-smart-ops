@@ -1918,6 +1918,101 @@ class TestSfaApi(HttpCase):
             for technical_str in ['res.partner', 'sale.order', 'account.move', 'record rules']:
                 self.assertNotIn(technical_str, msg_visit.lower(), f"Pesan error tidak boleh membocorkan string teknis '{technical_str}'")
 
+    def test_36_non_sfa_user_api_key_rejected_with_403(self):
+        """Memverifikasi otorisasi grup SFA pada _authenticate_request():
+        1. User internal biasa (base.group_user saja, bukan anggota ibns_smart_ops.group_sfa_user,
+           ibns_smart_ops.group_sfa_manager, maupun base.group_system) dengan Native API Key valid
+           ditolak dengan HTTP 403 pada:
+           - GET /api/v1/sfa/outlets
+           - POST /api/v1/sfa/sync-visit
+           - POST /api/v1/sfa/invoices
+        2. Pesan respons 403 tidak membocorkan nama grup atau modul internal (group_sfa_user,
+           group_sfa_manager, ibns_smart_ops).
+        3. User anggota ibns_smart_ops.group_sfa_user (driver) dan user base.group_system (administrator)
+           tetap lolos autentikasi dan menerima HTTP 200 pada GET /api/v1/sfa/outlets.
+        """
+        # 1. Buat user internal biasa (hanya base.group_user)
+        non_sfa_user = self.env['res.users'].create({
+            'name': 'Non SFA Regular User',
+            'login': f'non_sfa_user_{uuid.uuid4().hex[:8]}',
+            'email': 'non_sfa@ibns.local',
+            'groups_id': [(6, 0, [self.env.ref('base.group_user').id])],
+        })
+
+        # Pastikan user bukan anggota grup SFA maupun Administrator
+        self.assertFalse(non_sfa_user.has_group('ibns_smart_ops.group_sfa_user'))
+        self.assertFalse(non_sfa_user.has_group('ibns_smart_ops.group_sfa_manager'))
+        self.assertFalse(non_sfa_user.has_group('base.group_system'))
+
+        # Buat Native API Key (res.users.apikeys) untuk non_sfa_user
+        non_sfa_api_key = self.env['res.users.apikeys'].with_user(non_sfa_user).sudo()._generate(
+            scope='rpc', name='non_sfa_key', expiration_date=None
+        )
+
+        headers_get = {'X-IBNS-KEY': non_sfa_api_key}
+        headers_post = {
+            'X-IBNS-KEY': non_sfa_api_key,
+            'Content-Type': 'application/json',
+        }
+
+        # 1a. GET /api/v1/sfa/outlets -> Ditolak HTTP 403
+        res_outlets = self.url_open('/api/v1/sfa/outlets', headers=headers_get)
+        self.assertEqual(res_outlets.status_code, 403, "Non-SFA user harus ditolak dengan HTTP 403 pada GET outlets")
+        data_outlets = res_outlets.json()
+        self.assertEqual(data_outlets.get('status'), 'error')
+        self.assertEqual(data_outlets.get('message'), "Forbidden: User does not have SFA API access")
+
+        # 1b. POST /api/v1/sfa/sync-visit -> Ditolak HTTP 403
+        res_visit = self.url_open(
+            '/api/v1/sfa/sync-visit',
+            data=json.dumps({'outlet_id': self.test_outlet.id, 'notes': 'Field visit attempt by non-SFA user'}),
+            headers=headers_post,
+        )
+        self.assertEqual(res_visit.status_code, 403, "Non-SFA user harus ditolak dengan HTTP 403 pada POST sync-visit")
+        data_visit = res_visit.json()
+        self.assertEqual(data_visit.get('status'), 'error')
+        self.assertEqual(data_visit.get('message'), "Forbidden: User does not have SFA API access")
+
+        # 1c. POST /api/v1/sfa/invoices -> Ditolak HTTP 403
+        res_inv = self.url_open(
+            '/api/v1/sfa/invoices',
+            data=json.dumps({'partner_id': self.test_outlet.id, 'amount': 150000.0}),
+            headers=headers_post,
+        )
+        self.assertEqual(res_inv.status_code, 403, "Non-SFA user harus ditolak dengan HTTP 403 pada POST invoices")
+        data_inv = res_inv.json()
+        self.assertEqual(data_inv.get('status'), 'error')
+        self.assertEqual(data_inv.get('message'), "Forbidden: User does not have SFA API access")
+
+        # 2. Verifikasi pesan respons 403 tidak membocorkan nama grup atau modul internal
+        for res in [res_outlets, res_visit, res_inv]:
+            msg = res.json().get('message', '')
+            for forbidden_str in ['group_sfa_user', 'group_sfa_manager', 'ibns_smart_ops']:
+                self.assertNotIn(
+                    forbidden_str,
+                    msg.lower(),
+                    f"Pesan respons 403 tidak boleh membocorkan string '{forbidden_str}'"
+                )
+
+        # 3. User anggota ibns_smart_ops.group_sfa_user (driver) tetap lolos HTTP 200 pada GET outlets
+        driver_api_key = self.env['res.users.apikeys'].with_user(self.sfa_driver).sudo()._generate(
+            scope='rpc', name='driver_native_key', expiration_date=None
+        )
+        res_driver = self.url_open('/api/v1/sfa/outlets', headers={'X-IBNS-KEY': driver_api_key})
+        self.assertEqual(res_driver.status_code, 200, "Driver anggota SFA user harus lolos autentikasi (HTTP 200)")
+        self.assertEqual(res_driver.json().get('status'), 'success')
+        self.assertEqual(res_driver.json().get('authenticated_user'), self.sfa_driver.name)
+
+        # 4. User base.group_system (administrator) tetap lolos HTTP 200 pada GET outlets
+        admin_user = self.env.ref('base.user_admin')
+        admin_api_key = self.env['res.users.apikeys'].with_user(admin_user).sudo()._generate(
+            scope='rpc', name='admin_native_key', expiration_date=None
+        )
+        res_admin = self.url_open('/api/v1/sfa/outlets', headers={'X-IBNS-KEY': admin_api_key})
+        self.assertEqual(res_admin.status_code, 200, "Administrator (base.group_system) harus lolos autentikasi (HTTP 200)")
+        self.assertEqual(res_admin.json().get('status'), 'success')
+        self.assertEqual(res_admin.json().get('authenticated_user'), admin_user.name)
+
 
 
 

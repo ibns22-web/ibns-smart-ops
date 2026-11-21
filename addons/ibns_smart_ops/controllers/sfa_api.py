@@ -40,6 +40,7 @@ def _calculate_haversine_distance(lat1, lon1, lat2, lon2):
     a = (math.sin(delta_phi / 2.0) ** 2.0 +
          math.cos(phi1) * math.cos(phi2) *
          math.sin(delta_lambda / 2.0) ** 2.0)
+    a = min(1.0, max(0.0, a))
     c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
     return round(R * c, 1)
 

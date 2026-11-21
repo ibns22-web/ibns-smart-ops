@@ -6,7 +6,7 @@ import psycopg2
 from odoo.exceptions import AccessError, ValidationError
 from odoo.tests import HttpCase, tagged
 from odoo.tools import mute_logger
-from odoo.addons.ibns_smart_ops.controllers.sfa_api import _rate_limit_records
+from odoo.addons.ibns_smart_ops.controllers.sfa_api import _rate_limit_records, _calculate_haversine_distance
 
 
 @tagged('post_install', '-at_install')
@@ -2053,6 +2053,48 @@ class TestSfaApi(HttpCase):
             service_user.sudo().write({'active': True})
             self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', self.valid_token)
             self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', str(self.sfa_manager.id))
+
+    def test_38_haversine_antipodal_coordinates_no_domain_error(self):
+        """Memverifikasi perbaikan ValueError: math domain error pada kalkulasi Haversine:
+        1. Memanggil langsung _calculate_haversine_distance(12.345678, 98.765432, -12.345678, -81.234568)
+           tidak melempar ValueError dan mengembalikan 20015086.8.
+        2. Request POST /api/v1/sfa/sync-visit terhadap outlet berkoordinat (12.345678, 98.765432)
+           dengan check-in (-12.345678, -81.234568) menghasilkan HTTP 200 (bukan 500),
+           status == 'success', geofence.verified is False, dan geofence.distance_meters == 20015086.8.
+        """
+        # 1. Panggilan langsung fungsi Haversine dengan pasangan koordinat antipodal
+        dist = _calculate_haversine_distance(12.345678, 98.765432, -12.345678, -81.234568)
+        self.assertEqual(dist, 20015086.8, "Jarak Haversine antipodal harus 20015086.8 meter tanpa math domain error")
+
+        # 2. Buat outlet uji dengan koordinat spesifik (12.345678, 98.765432)
+        antipodal_outlet = self.env['res.partner'].create({
+            'name': 'Antipodal Test Outlet',
+            'customer_rank': 1,
+            'partner_latitude': 12.345678,
+            'partner_longitude': 98.765432,
+            'geofence_radius_meters': 150.0,
+        })
+
+        # 3. Request POST /api/v1/sfa/sync-visit dengan check-in koordinat antipodal (-12.345678, -81.234568)
+        headers = {
+            'X-IBNS-KEY': self.valid_token,
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'outlet_id': antipodal_outlet.id,
+            'checkin_latitude': -12.345678,
+            'checkin_longitude': -81.234568,
+            'notes': 'Antipodal geofence check-in validation',
+        }
+        res = self.url_open('/api/v1/sfa/sync-visit', data=json.dumps(payload), headers=headers)
+        self.assertEqual(res.status_code, 200, "Request sync-visit antipodal harus menghasilkan HTTP 200 (bukan HTTP 500)")
+
+        data = res.json()
+        self.assertEqual(data.get('status'), 'success')
+        geofence = data.get('geofence')
+        self.assertTrue(geofence, "Objek geofence harus ada pada payload respons")
+        self.assertIs(geofence.get('verified'), False, "Check-in jarak antipodal harus verified = False")
+        self.assertEqual(geofence.get('distance_meters'), 20015086.8, "Jarak geofence harus tepat 20015086.8 meter")
 
 
 

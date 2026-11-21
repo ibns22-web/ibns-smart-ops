@@ -2013,6 +2013,47 @@ class TestSfaApi(HttpCase):
         self.assertEqual(res_admin.json().get('status'), 'success')
         self.assertEqual(res_admin.json().get('authenticated_user'), admin_user.name)
 
+    def test_37_system_key_fallback_to_service_user(self):
+        """Memverifikasi perbaikan bug AccessError pada fallback autentikasi service_user:
+        1. Konfigurasi ir.config_parameter dengan sfa_api_key terisi sebuah kunci valid,
+           sedangkan sfa_api_user_id kosong/dihapus.
+        2. Request stateless ke GET /api/v1/sfa/outlets dengan header X-IBNS-KEY berisi
+           kunci tersebut berhasil mendapatkan HTTP 200, status == 'success',
+           dan authenticated_user == 'SFA API System Service'.
+        3. Jika ibns_smart_ops.user_sfa_api_service dinonaktifkan sementara (active = False),
+           request yang sama ditolak bersih dengan HTTP 401.
+        """
+        fallback_key = f"system_fallback_key_{uuid.uuid4().hex}"
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', fallback_key)
+        self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', False)
+
+        service_user = self.env.ref('ibns_smart_ops.user_sfa_api_service')
+        self.assertTrue(service_user.exists(), "User service SFA API harus ada")
+        self.assertTrue(service_user.active, "User service SFA API harus aktif secara default")
+
+        headers = {'X-IBNS-KEY': fallback_key}
+
+        try:
+            # 1. Request saat user_sfa_api_service aktif -> Berhasil HTTP 200
+            res = self.url_open('/api/v1/sfa/outlets', headers=headers)
+            self.assertEqual(res.status_code, 200, "Fallback ke service_user harus menghasilkan HTTP 200")
+            payload = res.json()
+            self.assertEqual(payload.get('status'), 'success')
+            self.assertEqual(payload.get('authenticated_user'), 'SFA API System Service')
+
+            # 2. Nonaktifkan service_user sementara -> Ditolak bersih dengan HTTP 401
+            service_user.sudo().write({'active': False})
+            res_inactive = self.url_open('/api/v1/sfa/outlets', headers=headers)
+            self.assertEqual(res_inactive.status_code, 401, "Service user nonaktif harus ditolak dengan HTTP 401")
+            payload_inactive = res_inactive.json()
+            self.assertEqual(payload_inactive.get('status'), 'error')
+            self.assertEqual(payload_inactive.get('message'), "Unauthorized: Invalid or inactive API key")
+        finally:
+            # Kembalikan state service_user dan parameter konfigurasi sistem
+            service_user.sudo().write({'active': True})
+            self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_key', self.valid_token)
+            self.env['ir.config_parameter'].sudo().set_param('ibns_smart_ops.sfa_api_user_id', str(self.sfa_manager.id))
+
 
 
 

@@ -230,7 +230,7 @@ class SfaApiController(http.Controller):
                             authenticated_user = sys_user
 
                     if not authenticated_user:
-                        service_user = request.env.ref('ibns_smart_ops.user_sfa_api_service', raise_if_not_found=False)
+                        service_user = request.env(su=True).ref('ibns_smart_ops.user_sfa_api_service', raise_if_not_found=False)
                         if service_user and service_user.exists() and service_user.active:
                             authenticated_user = service_user
 
